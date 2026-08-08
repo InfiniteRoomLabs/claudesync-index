@@ -82,7 +82,7 @@ def _preflight_claude_binary() -> None:
         return
     print("csindex: missing required commands: claude", file=sys.stderr)
     print("    claude: https://claude.com/claude-code", file=sys.stderr)
-    sys.exit(exit_codes.CONFIG)
+    sys.exit(exit_codes.NOT_FOUND)
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 
 - The prompt ships as package data `src/reindex/prompts/quick.md` (adapted from the private `reindex.md`, provenance-scrubbed), loaded via `prompt_loader.load_prompt("quick")` so `--prompts-dir` overrides it per-file like every other prompt.
 - `{{EXPORT_DIR}}` substitution keyed off the resolved export root (Task 3 semantics: `--root`/`$CSINDEX_ROOT`/CWD, exit 65 on invalid tree).
-- Restore `_preflight_claude_binary()` (deleted in v1 as dead code) — missing `claude` binary -> exit 78 CONFIG with an install hint. Deliberately claude-CLI-only; that is the feature (subscription-cheap refresh), documented as such.
+- Restore `_preflight_claude_binary()` (deleted in v1 as dead code) — missing `claude` binary -> exit 127 NOT_FOUND with an install hint. Deliberately claude-CLI-only; that is the feature (subscription-cheap refresh), documented as such.
 
 ### CLI surface
 
@@ -78,7 +78,7 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 | Collection/model mismatch or unstamped collection | 65 | both models named + single remedy (wipe persist dir, re-embed) |
 | chromadb not installed | 78 | `pip install "claudesync-index[embed]"` / uv equivalent |
 | Transient backend HTTP | retried, then per-source failure count | unchanged upstream semantics |
-| `claude` binary missing (quick) | 78 | install hint |
+| `claude` binary missing (quick) | 127 NOT_FOUND | install hint |
 
 ## Testing
 

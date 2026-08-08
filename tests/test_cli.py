@@ -536,10 +536,10 @@ def test_quick_invalid_root_exits_65(tmp_path):
     assert result.exit_code == exit_codes.DATAERR
 
 
-def test_quick_missing_claude_binary_exits_78(tmp_export, monkeypatch):
+def test_quick_missing_claude_binary_exits_127(tmp_export, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: None)
     result = runner.invoke(cli.app, ["quick"])
-    assert result.exit_code == exit_codes.CONFIG
+    assert result.exit_code == exit_codes.NOT_FOUND
 
 
 def test_quick_pipes_packaged_prompt_to_claude(tmp_export, monkeypatch):
