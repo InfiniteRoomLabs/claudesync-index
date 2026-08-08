@@ -1,0 +1,17 @@
+# mise.toml -- pinned CLI toolchain + task runner for claudesync-index.
+# uv is pinned here; Python interpreters and package deps are uv-managed.
+
+[tools]
+uv = "0.10.3"
+
+[tasks.test]
+run = "uv run pytest tests/ --cov=reindex --cov-fail-under=85"
+
+[tasks.lint]
+run = "uv run ruff check ."
+
+[tasks.build]
+run = "uv build"
+
+[tasks.docker-build]
+run = "docker build -t claudesync-index:dev ."

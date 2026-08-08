@@ -1,0 +1,3 @@
+# Backlog
+
+- [ ] **Generalize and restore the v1 cut surface** (`quick`, the `work` sub-app, `embed`/`search`/`embed-migrate`). These exist working in the private upstream repo (claude-ai-export) but were cut from the public v1 because they assume the maintainer's machine. For the agent picking this up: copy `workflow_cli.py`, `embedding.py`, the `quick` command, and their tests from the upstream repo, then modify them for general use by anyone — configurable embedding backend/base URL instead of a hardcoded local Ollama, no assumption of a preexisting opencode agent, no machine-specific paths. Ship behind the same provider/config patterns the rest of the CLI uses.

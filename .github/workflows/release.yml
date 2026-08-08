@@ -1,0 +1,47 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag matches pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          [ "$TAG" = "$VER" ] || { echo "tag v$TAG != pyproject $VER"; exit 1; }
+  test:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+  pypi:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { version: "0.10.3" }
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions: { packages: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          IMG=ghcr.io/infiniteroomlabs/claudesync-index
+          docker build -t $IMG:${GITHUB_REF_NAME#v} -t $IMG:latest .
+          docker run --rm $IMG:latest --help
+          docker push $IMG:${GITHUB_REF_NAME#v}
+          docker push $IMG:latest

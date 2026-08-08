@@ -1,0 +1,61 @@
+# reindex.example.toml
+#
+# Optional config file. Copy to `reindex.toml` and place it at the root of
+# your claudesync export tree (the same directory that contains
+# `conversations/` and/or `projects/`). Every field below is optional and
+# overrides a built-in default — an export with no reindex.toml at all runs
+# fine with the defaults baked into `src/reindex/config.py`.
+#
+# Precedence for provider selection: CLI --provider > $CSINDEX_PROVIDER >
+# [reindex].provider (below) > "claude-cli".
+#
+# The baked-in model IDs and per-token prices in config.py are point-in-time
+# defaults. When Anthropic ships new models or changes pricing, override
+# them here instead of waiting on a claudesync-index release.
+
+[reindex]
+provider = "claude-cli"
+
+# --- anthropic / claude-cli (same model tiers, different billing) ---
+
+[reindex.providers.anthropic.models]
+leaf = "claude-haiku-4-5-20251001"
+project = "claude-haiku-4-5-20251001"
+root = "claude-opus-4-7"
+# Transcripts over this size use `leaf_large` instead of `leaf` for the leaf tier.
+leaf_large = "claude-sonnet-4-6"
+large_leaf_kb = 600
+# Retry model when a retryable provider failure occurs (schema violation,
+# parse failure). Set to an empty string to disable escalation; omitting
+# this key keeps the built-in default escalation model.
+escalation = "claude-sonnet-4-6[1m]"
+
+[reindex.providers.anthropic.pricing]
+# USD per 1M tokens, prefix-matched against the requested model id.
+"claude-haiku-4-5" = { input = 1.0, output = 5.0 }
+"claude-sonnet-4-6" = { input = 3.0, output = 15.0 }
+"claude-opus-4-7" = { input = 15.0, output = 75.0 }
+
+# claude-cli runs on your Pro/Max subscription quota, not per-token billing,
+# but shares the same model-tier config shape:
+# [reindex.providers.claude-cli.models]
+# leaf = "claude-haiku-4-5-20251001"
+# project = "claude-haiku-4-5-20251001"
+# root = "claude-opus-4-7"
+
+# --- ollama (local, free) ---
+
+[reindex.providers.ollama]
+base_url = "http://127.0.0.1:11434"
+
+[reindex.providers.ollama.models]
+leaf = "llama3.2"
+project = "llama3.2"
+root = "llama3.2"
+
+# --- opencode (bring your own opencode setup — Groq, Gemini, etc.) ---
+
+[reindex.providers.opencode.models]
+leaf = "google/gemini-2.5-flash"
+project = "google/gemini-2.5-flash"
+root = "google/gemini-2.5-flash"

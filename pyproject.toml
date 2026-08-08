@@ -1,0 +1,77 @@
+[project]
+name = "claudesync-index"
+version = "0.1.0"
+description = "Hierarchical AI-generated index over a claudesync export of your claude.ai conversations."
+authors = [{ name = "Infinite Room Labs", email = "wes@infiniteroomlabs.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.40",
+    "httpx>=0.28.1",
+    "pydantic>=2.9",
+    "python-dotenv>=1.0",
+    "structlog>=24.4",
+    "typer>=0.12",
+]
+
+[project.urls]
+Repository = "https://github.com/InfiniteRoomLabs/claudesync-index"
+
+[project.scripts]
+csindex = "reindex.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.10.3,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "reindex"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+include = ["src"]
+exclude = ["**/__pycache__", "**/.venv"]
+reportMissingImports = "error"
+typeCheckingMode = "standard"
+
+[tool.ruff]
+src = ["src"]
+target-version = "py312"
+# Bumped 100 -> 120: the codebase never actually respected 100 (95 E501 hits at
+# that width, mostly typer help text and structlog call sites); 120 keeps a real
+# limit without reflowing dozens of lines for no behavioral value.
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N"]
+# N818: exception classes (ProviderFailure, InvalidExportTree) predate this
+# lint and are public API referenced across 16 files; renaming for an
+# Error-suffix convention is pure churn with no behavioral upside.
+ignore = ["N818"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    # asyncio leaks an event loop / socket on warmup of httpx clients in mocked
+    # AsyncAnthropic; ResourceWarning fires post-test and the unraisable hook
+    # converts it to a failure. We don't ship httpx clients in tests.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+    "ignore::ResourceWarning",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.14",
+]

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.env
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+.batch-state.json
+.reindex-costs.jsonl
+.reindex-failures.jsonl
+.reindex.log.jsonl
+.reindex.lock
