@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-08
+
 ### Added
 - Release infrastructure: `.github/workflows/release.yml` workflow for tag-triggered PyPI publishing (trusted publishers) and GHCR image builds. Includes tag/version consistency validation and multi-job dependency chain (check → test → pypi/docker). `docs/release-bootstrap.md` provides one-time setup checklist for PyPI environment, GitHub Actions environment, and organization package settings.
 - Project scaffold: `pyproject.toml` (package `reindex`, console script `csindex`), `uv.lock`
