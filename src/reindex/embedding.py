@@ -26,11 +26,19 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
 from reindex import log, shutdown
+
+
+class Embedder(Protocol):
+    model: str
+
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+    async def aclose(self) -> None: ...
+
 
 # Concurrent files in flight. The bottleneck is the Cloudflare round-trip, so
 # parallelism here is pure latency hiding; 8 is well under Workers AI rate caps.
@@ -239,6 +247,116 @@ class CloudflareEmbedder:
         await self._client.aclose()
 
 
+class EmbeddingConfigError(RuntimeError):
+    """Bad or missing embedding configuration. CLI maps this to exit 78."""
+
+
+DEFAULT_MODELS = {
+    "cloudflare": DEFAULT_MODEL,          # @cf/baai/bge-m3
+    "openai": "text-embedding-3-small",
+    "ollama": "nomic-embed-text",
+}
+
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com",
+    "ollama": "http://127.0.0.1:11434",
+}
+
+
+class _HttpEmbedder:
+    """Shared mechanics for JSON-POST embedding backends: batching via
+    _pack_batches, transient retry (429/5xx), lazy client."""
+
+    model: str
+
+    def __init__(self, model: str, base_url: str) -> None:
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+        self._retry_base_delay = 1.0
+
+    # subclasses define: _path(), _headers(), _payload(batch), _parse(data)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for batch in _pack_batches(texts):
+            out.extend(await self._embed_batch(batch))
+        return out
+
+    async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
+        url = f"{self.base_url}{self._path()}"
+        for attempt in range(4):
+            resp = await self._client.post(url, json=self._payload(batch), headers=self._headers())
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt == 3:
+                    raise RuntimeError(f"embedding backend gave up after retries: HTTP {resp.status_code}")
+                await asyncio.sleep(self._retry_base_delay * (2 ** attempt))
+                continue
+            if resp.status_code >= 400:
+                raise RuntimeError(f"embedding request failed: HTTP {resp.status_code}: {resp.text[:300]}")
+            return self._parse(resp.json())
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+
+
+class OpenAIEmbedder(_HttpEmbedder):
+    """Any OpenAI-compatible /v1/embeddings server (OpenAI, LM Studio, vLLM)."""
+
+    def _path(self) -> str:
+        return "/v1/embeddings"
+
+    def _headers(self) -> dict[str, str]:
+        key = os.environ.get("CSINDEX_EMBED_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    def _payload(self, batch: list[str]) -> dict:
+        return {"model": self.model, "input": batch}
+
+    def _parse(self, data: Any) -> list[list[float]]:
+        items = sorted(data["data"], key=lambda d: d["index"])
+        return [d["embedding"] for d in items]
+
+
+class OllamaEmbedder(_HttpEmbedder):
+    """Native Ollama /api/embed endpoint. No auth."""
+
+    def _path(self) -> str:
+        return "/api/embed"
+
+    def _headers(self) -> dict[str, str]:
+        return {}
+
+    def _payload(self, batch: list[str]) -> dict:
+        return {"model": self.model, "input": batch}
+
+    def _parse(self, data: Any) -> list[list[float]]:
+        return data["embeddings"]
+
+
+def make_embedder(backend: str, *, model: str | None, base_url: str | None) -> Embedder:
+    """Build an embedder for `backend`. Raises EmbeddingConfigError on unknown
+    backend or missing credentials; the CLI maps that to exit 78 CONFIG."""
+    resolved_model = model or DEFAULT_MODELS.get(backend)
+    if backend == "cloudflare":
+        try:
+            cfg = CFConfig.from_env(model=resolved_model)
+        except RuntimeError as e:
+            raise EmbeddingConfigError(str(e)) from e
+        return CloudflareEmbedder(cfg)
+    if backend == "openai":
+        return OpenAIEmbedder(resolved_model, base_url or DEFAULT_BASE_URLS["openai"])
+    if backend == "ollama":
+        return OllamaEmbedder(resolved_model, base_url or DEFAULT_BASE_URLS["ollama"])
+    raise EmbeddingConfigError(
+        f"Unknown embedding backend {backend!r}. Choose one of: cloudflare, ollama, openai."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Corpus walk + Chroma store
 # ---------------------------------------------------------------------------
@@ -370,7 +488,7 @@ async def embed_corpus(
     root: Path,
     persist_dir: Path,
     *,
-    embedder: CloudflareEmbedder,
+    embedder: Embedder,
     limit: int = 0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
     overlap: int = DEFAULT_OVERLAP_CHARS,
@@ -481,7 +599,7 @@ async def search(
     persist_dir: Path,
     query: str,
     *,
-    embedder: CloudflareEmbedder,
+    embedder: Embedder,
     k: int = 5,
     kind: str | None = None,
 ) -> list[dict]:
