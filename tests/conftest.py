@@ -13,10 +13,19 @@ Strategy:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Rich force-enables ANSI output when it detects GitHub Actions, which breaks
+# the suite's plain-substring assertions on --help text. Pin a plain, fixed-
+# width rendering environment so test output is identical locally and in CI.
+os.environ["NO_COLOR"] = "1"
+os.environ["COLUMNS"] = "120"
+os.environ.pop("FORCE_COLOR", None)
+os.environ.pop("GITHUB_ACTIONS", None)
 
 # ---------------------------------------------------------------------------
 # Filesystem fixtures
