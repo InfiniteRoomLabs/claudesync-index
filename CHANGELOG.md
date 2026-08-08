@@ -110,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing (`$XDG_CONFIG_HOME/opencode/agent/quick.md`, falling back to `~/.config`)
   instead of being hardcoded — a fresh install now runs against opencode's default agent
   with a one-line warning instead of requiring the file to be pre-configured.
+- `embed`/`search`/`embed-migrate`: a missing `chromadb` (embed extra not installed) now
+  exits 78 CONFIG with the "Install the embed extra" hint on all three commands, instead
+  of a buried exit-70 log (`embed`) or a raw traceback at exit 1 (`search`,
+  `embed-migrate`). `get_collection`/`open_collection` now raise `EmbeddingConfigError`
+  (a `RuntimeError` subclass) instead of a bare `RuntimeError` for the lazy chromadb
+  import, and `embed-migrate` gained the config-error handler it was missing entirely.
 
 ### Docs
 - `TODO.md`: Project backlog documenting plans to generalize `quick`/`work`/`embed` features from the private upstream repo for public use, with configurable embedding backends and zero machine-specific assumptions.

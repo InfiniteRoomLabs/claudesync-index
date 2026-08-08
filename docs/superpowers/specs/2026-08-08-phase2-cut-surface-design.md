@@ -59,7 +59,7 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 
 - `csindex quick` — options exactly as upstream (log flags) plus the standard root guard.
 - `csindex embed [--backend --model --base-url --force --max-in-flight --no-conversations --no-summaries]`
-- `csindex search QUERY [-k N] [--kind conversation|summary] [--backend --model --base-url]`
+- `csindex search QUERY [--k N] [--kind conversation|summary] [--backend --model --base-url]`
 - `csindex embed-migrate` — the existing `backfill_kind` metadata backfill, unchanged.
 - All four call the standard `_require_root_or_exit()` guard and accept command-level `--root` per the established dual-placement pattern.
 - Chroma persist dir: `<export root>/.vector-db` (upstream default, kept for continuity with existing stores), overridable with `--persist` on all three embedding commands.

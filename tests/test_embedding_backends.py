@@ -118,3 +118,61 @@ async def test_new_backends_4xx_fails_immediately():
     with pytest.raises(RuntimeError):
         await e.embed(["a"])
     await e.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_backends_retry_transport_error_then_succeed():
+    """A transport-level failure (connection reset, DNS blip, timeout) gets
+    the same retry/backoff treatment as a 429/5xx response, not an immediate
+    raise -- mirrors CloudflareEmbedder._embed_batch's retry ladder."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, json={"embeddings": [[0.5]]})
+
+    e = embedding.make_embedder("ollama", model=None, base_url=None)
+    e._client = httpx.AsyncClient(transport=_mock_transport(handler))
+    e._retry_base_delay = 0.0
+    vecs = await e.embed(["a"])
+    assert calls["n"] == 2 and vecs == [[0.5]]
+    await e.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_backends_transport_error_gives_up_after_retries():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection reset", request=request)
+
+    e = embedding.make_embedder("ollama", model=None, base_url=None)
+    e._client = httpx.AsyncClient(transport=_mock_transport(handler))
+    e._retry_base_delay = 0.0
+    with pytest.raises(RuntimeError, match="gave up after retries"):
+        await e.embed(["a"])
+    await e.aclose()
+
+
+@pytest.mark.asyncio
+async def test_openai_embedder_short_response_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1]}]})
+
+    e = embedding.make_embedder("openai", model="m", base_url="http://x")
+    e._client = httpx.AsyncClient(transport=_mock_transport(handler))
+    with pytest.raises(RuntimeError, match=r"1 vectors for 2 inputs"):
+        await e.embed(["a", "b"])
+    await e.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ollama_embedder_short_response_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"embeddings": [[0.1]]})
+
+    e = embedding.make_embedder("ollama", model=None, base_url=None)
+    e._client = httpx.AsyncClient(transport=_mock_transport(handler))
+    with pytest.raises(RuntimeError, match=r"1 vectors for 2 inputs"):
+        await e.embed(["a", "b"])
+    await e.aclose()

@@ -523,6 +523,46 @@ def test_embed_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, tm
 
 
 # ---------------------------------------------------------------------------
+# Missing chromadb (embed extra not installed) -- exit 78 CONFIG, not a
+# buried SOFTWARE(70) log or a raw traceback. See EmbeddingConfigError.
+# ---------------------------------------------------------------------------
+
+def _block_chromadb_import(monkeypatch):
+    """`import chromadb` raises ImportError even though the real package is
+    installed in this venv: a `None` entry in sys.modules halts the import
+    machinery before the finder ever runs (documented CPython behavior)."""
+    import sys
+    monkeypatch.setitem(sys.modules, "chromadb", None)
+
+
+def test_embed_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["embed", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+def test_search_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["search", "anything", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+def test_embed_migrate_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["embed-migrate", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+# ---------------------------------------------------------------------------
 # quick: claude-cli refresh with packaged prompt
 # ---------------------------------------------------------------------------
 

@@ -551,8 +551,9 @@ def embed(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
 ) -> None:
     """EXPERIMENT: embed full conversation.md + INDEX.md summary contents into a
-    local vector DB (Cloudflare bge-m3 -> Chroma). Orthogonal to the index.md
-    hierarchy. Tag each chunk kind=conversation|summary for filtered search."""
+    local vector DB via a config-driven backend (cloudflare/openai/ollama) ->
+    Chroma. Orthogonal to the index.md hierarchy. Tag each chunk
+    kind=conversation|summary for filtered search."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
@@ -602,6 +603,9 @@ def embed(
             except embedding.CollectionMismatch as e:
                 olog.error("embed_collection_mismatch", error=str(e))
                 exit_code = exit_codes.DATAERR
+            except embedding.EmbeddingConfigError as e:
+                olog.error("embed_config", error=str(e))
+                exit_code = exit_codes.CONFIG
             except RuntimeError as e:
                 olog.error("embed_failed", error=str(e)[:500])
                 exit_code = exit_codes.SOFTWARE
@@ -667,6 +671,9 @@ def search(
     except embedding.CollectionMismatch as e:
         log.get("orchestrator").error("search_collection_mismatch", error=str(e))
         raise typer.Exit(exit_codes.DATAERR) from e
+    except embedding.EmbeddingConfigError as e:
+        log.get("orchestrator").error("search_config", error=str(e))
+        raise typer.Exit(exit_codes.CONFIG) from e
 
     for h in hits:
         snippet = " ".join(h["text"].split())[:200]
@@ -693,7 +700,11 @@ def embed_migrate(
 
     _common_setup(None, None, no_color, no_log_file=True)
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
-    n = embedding.backfill_kind(persist_dir)
+    try:
+        n = embedding.backfill_kind(persist_dir)
+    except embedding.EmbeddingConfigError as e:
+        log.get("orchestrator").error("embed_migrate_config", error=str(e))
+        raise typer.Exit(exit_codes.CONFIG) from e
     log.get("orchestrator").info("embed_migrate_done", chunks_tagged=n)
     raise typer.Exit(exit_codes.OK)
 

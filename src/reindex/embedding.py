@@ -2,18 +2,20 @@
 Optional full-content vector indexing — an experiment alongside the index.md
 hierarchy, NOT a replacement.
 
-Pipeline: walk leaf conversation.md files -> chunk -> embed via Cloudflare
-Workers AI (bge-m3) -> upsert into a local persistent Chroma collection.
-A query path (search) embeds the query the same way and returns nearest chunks.
+Pipeline: walk leaf conversation.md files -> chunk -> embed via a
+config-driven backend (Cloudflare Workers AI, OpenAI-compatible, or Ollama)
+-> upsert into a local persistent Chroma collection. A query path (search)
+embeds the query the same way and returns nearest chunks.
 
 This deliberately does NOT reuse the providers/ abstraction: that contract is
 LLM-structured-output shaped (text -> Pydantic), whereas embedding is
 text -> float vector. Different shape, separate code path, zero blast radius
 on the summary pipeline.
 
-Cloudflare creds (environment variables):
-    CF_ACCOUNT_ID   Cloudflare account id
-    CF_API_TOKEN    API token with the "Workers AI" permission
+Backend selection is config-driven: `--backend`/`--model`/`--base-url`,
+`$CSINDEX_EMBED_*`, or `reindex.toml [embedding]` (see `config.resolve_embedding`).
+Cloudflare-specific credential details (`CF_ACCOUNT_ID`/`CF_API_TOKEN`) live in
+the README, not here.
 
 chromadb is an optional dependency: `uv sync --extra embed`.
 """
@@ -277,7 +279,7 @@ class _HttpEmbedder:
         self._client: httpx.AsyncClient | None = None
         self._retry_base_delay = 1.0
 
-    # subclasses define: _path(), _headers(), _payload(batch), _parse(data)
+    # subclasses define: _path(), _headers(), _payload(batch), _parse(data, batch_len)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
@@ -289,8 +291,20 @@ class _HttpEmbedder:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
         url = f"{self.base_url}{self._path()}"
+        last_exc: Exception | None = None
         for attempt in range(4):
-            resp = await self._client.post(url, json=self._payload(batch), headers=self._headers())
+            try:
+                resp = await self._client.post(url, json=self._payload(batch), headers=self._headers())
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                # Transport-level failure (connection reset, DNS, timeout) —
+                # same retry/backoff treatment as a 429/5xx response.
+                last_exc = e
+                if attempt == 3:
+                    raise RuntimeError(
+                        f"embedding backend gave up after retries: {type(e).__name__}: {e}"
+                    ) from e
+                await asyncio.sleep(self._retry_base_delay * (2 ** attempt))
+                continue
             if resp.status_code == 429 or resp.status_code >= 500:
                 if attempt == 3:
                     raise RuntimeError(f"embedding backend gave up after retries: HTTP {resp.status_code}")
@@ -298,8 +312,8 @@ class _HttpEmbedder:
                 continue
             if resp.status_code >= 400:
                 raise RuntimeError(f"embedding request failed: HTTP {resp.status_code}: {resp.text[:300]}")
-            return self._parse(resp.json())
-        raise AssertionError("unreachable")
+            return self._parse(resp.json(), len(batch))
+        raise AssertionError(f"unreachable; last_exc={last_exc}")
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -319,9 +333,14 @@ class OpenAIEmbedder(_HttpEmbedder):
     def _payload(self, batch: list[str]) -> dict:
         return {"model": self.model, "input": batch}
 
-    def _parse(self, data: Any) -> list[list[float]]:
+    def _parse(self, data: Any, batch_len: int) -> list[list[float]]:
         items = sorted(data["data"], key=lambda d: d["index"])
-        return [d["embedding"] for d in items]
+        vecs = [d["embedding"] for d in items]
+        if len(vecs) != batch_len:
+            raise RuntimeError(
+                f"OpenAI-compatible embed returned {len(vecs)} vectors for {batch_len} inputs"
+            )
+        return vecs
 
 
 class OllamaEmbedder(_HttpEmbedder):
@@ -336,8 +355,13 @@ class OllamaEmbedder(_HttpEmbedder):
     def _payload(self, batch: list[str]) -> dict:
         return {"model": self.model, "input": batch}
 
-    def _parse(self, data: Any) -> list[list[float]]:
-        return data["embeddings"]
+    def _parse(self, data: Any, batch_len: int) -> list[list[float]]:
+        vecs = data["embeddings"]
+        if len(vecs) != batch_len:
+            raise RuntimeError(
+                f"Ollama embed returned {len(vecs)} vectors for {batch_len} inputs"
+            )
+        return vecs
 
 
 def make_embedder(backend: str, *, model: str | None, base_url: str | None) -> Embedder:
@@ -429,7 +453,7 @@ def get_collection(persist_dir: Path, name: str = "conversations"):
     try:
         import chromadb  # type: ignore[import-not-found]
     except ImportError as e:
-        raise RuntimeError(
+        raise EmbeddingConfigError(
             "chromadb not installed. Install the embed extra: uv sync --extra embed "
             "(or pip install 'claudesync-index[embed]')."
         ) from e
@@ -448,7 +472,7 @@ def open_collection(persist_dir: Path, *, backend: str, model: str, name: str = 
     try:
         import chromadb  # type: ignore[import-not-found]
     except ImportError as e:
-        raise RuntimeError(
+        raise EmbeddingConfigError(
             "chromadb not installed. Install the embed extra: uv sync --extra embed "
             "(or pip install 'claudesync-index[embed]')."
         ) from e
