@@ -62,12 +62,12 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 - `csindex search QUERY [-k N] [--kind conversation|summary] [--backend --model --base-url]`
 - `csindex embed-migrate` — the existing `backfill_kind` metadata backfill, unchanged.
 - All four call the standard `_require_root_or_exit()` guard and accept command-level `--root` per the established dual-placement pattern.
-- Chroma persist dir: `<export root>/.chroma` (upstream default), overridable with `--persist-dir` on all three embedding commands.
+- Chroma persist dir: `<export root>/.vector-db` (upstream default, kept for continuity with existing stores), overridable with `--persist` on all three embedding commands.
 
 ### Packaging
 
 - `chromadb` returns as the `[embed]` optional extra (`uv add --optional embed chromadb`); the existing lazy import + "install the extra" error message pattern stays.
-- `.gitignore` gains `.chroma/`.
+- `.gitignore` gains `.vector-db/`.
 
 ## Error handling summary
 
