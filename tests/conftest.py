@@ -80,6 +80,11 @@ def tmp_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Test isolation: provider selection reads $CSINDEX_PROVIDER; clear it so
     # a developer's shell env can't leak into tests.
     monkeypatch.delenv("CSINDEX_PROVIDER", raising=False)
+    # Same for the embedding backend trio — a dev shell exporting these for
+    # `csindex embed`/`search` use must not leak into tests.
+    monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
+    monkeypatch.delenv("CSINDEX_EMBED_MODEL", raising=False)
+    monkeypatch.delenv("CSINDEX_EMBED_BASE_URL", raising=False)
 
     # Init both logs empty so failures.count() / cost_log.aggregate() see 0.
     (tmp_path / ".reindex-costs.jsonl").write_text("", encoding="utf-8")

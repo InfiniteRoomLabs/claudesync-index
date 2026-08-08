@@ -402,18 +402,22 @@ def test_embed_both_no_flags_exits_usage(tmp_export):
 
 
 def test_embed_missing_cf_creds_exits_config(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
     monkeypatch.delenv("CF_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("CF_API_TOKEN", raising=False)
     monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
     res = runner.invoke(cli.app, ["embed"])
     assert res.exit_code == exit_codes.CONFIG
+    assert "CF_ACCOUNT_ID" in res.output
 
 
 def test_search_missing_cf_creds_exits_config(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
     monkeypatch.delenv("CF_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("CF_API_TOKEN", raising=False)
     res = runner.invoke(cli.app, ["search", "anything"])
     assert res.exit_code == exit_codes.CONFIG
+    assert "CF_ACCOUNT_ID" in res.output
 
 
 def test_embed_e2e_success(tmp_export, make_conv, monkeypatch):
