@@ -10,3 +10,4 @@ dist/
 .reindex-failures.jsonl
 .reindex.log.jsonl
 .reindex.lock
+.vector-db/
