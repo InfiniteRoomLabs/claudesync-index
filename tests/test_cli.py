@@ -418,6 +418,7 @@ def test_search_missing_cf_creds_exits_config(tmp_export, monkeypatch):
 
 def test_embed_e2e_success(tmp_export, make_conv, monkeypatch):
     monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
     monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
     monkeypatch.setenv("CF_API_TOKEN", "tok")
     make_conv("alpha")
@@ -438,6 +439,7 @@ def test_embed_e2e_success(tmp_export, make_conv, monkeypatch):
 
 def test_embed_e2e_reports_failures_as_tempfail(tmp_export, monkeypatch):
     monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
     monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
     monkeypatch.setenv("CF_API_TOKEN", "tok")
 
@@ -450,6 +452,7 @@ def test_embed_e2e_reports_failures_as_tempfail(tmp_export, monkeypatch):
 
 
 def test_search_e2e_success(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
     monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
     monkeypatch.setenv("CF_API_TOKEN", "tok")
 
@@ -471,3 +474,9 @@ def test_embed_migrate_e2e_success(tmp_export, monkeypatch):
 
     res = runner.invoke(cli.app, ["embed-migrate", "--persist", "custom-vdb"])
     assert res.exit_code == exit_codes.OK
+
+
+def test_embed_unconfigured_backend_exits_78(tmp_export, monkeypatch):
+    monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
+    result = runner.invoke(cli.app, ["embed"])
+    assert result.exit_code == exit_codes.CONFIG

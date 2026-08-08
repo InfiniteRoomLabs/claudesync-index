@@ -188,6 +188,8 @@ def _extract_vectors(result: Any) -> list[list[float]]:
 
 
 class CloudflareEmbedder:
+    model = property(lambda self: self.cfg.model)
+
     def __init__(self, cfg: CFConfig) -> None:
         self.cfg = cfg
         self._client = httpx.AsyncClient(
@@ -497,7 +499,7 @@ async def embed_corpus(
     conversations: bool = True,
     summaries: bool = True,
 ) -> EmbedStats:
-    """Walk sources, chunk, embed via Cloudflare, store into Chroma.
+    """Walk sources, chunk, embed via the configured backend, store into Chroma.
 
     Sources are of two `kind`s — raw conversation.md and generated INDEX.md
     summaries — in separate id namespaces (conversation = `slug#i`, summary =

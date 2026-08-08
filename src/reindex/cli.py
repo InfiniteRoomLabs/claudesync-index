@@ -455,7 +455,17 @@ def embed(
         "Also accepted before the subcommand: `csindex --root PATH embed ...`.",
     )] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap number of conversations (0 = all).")] = 0,
-    model: Annotated[str, typer.Option("--model", help="Cloudflare Workers AI embedding model.")] = "@cf/baai/bge-m3",
+    backend: Annotated[str | None, typer.Option(
+        "--backend", help="Embedding backend: cloudflare, ollama, or openai. "
+        "Default from $CSINDEX_EMBED_BACKEND / reindex.toml [embedding].backend.",
+    )] = None,
+    model: Annotated[str | None, typer.Option(
+        "--model", help="Embedding model. Default: backend-specific default when omitted.",
+    )] = None,
+    base_url: Annotated[str | None, typer.Option(
+        "--base-url", help="Base URL for the openai/ollama backends. "
+        "Default from $CSINDEX_EMBED_BASE_URL / reindex.toml [embedding].base_url.",
+    )] = None,
     chunk_chars: Annotated[int, typer.Option("--chunk-chars")] = 2000,
     overlap: Annotated[int, typer.Option("--overlap")] = 200,
     force: Annotated[bool, typer.Option(
@@ -493,12 +503,11 @@ def embed(
         olog.error("embed_nothing_to_do", reason="--no-conversations and --no-summaries")
         raise typer.Exit(exit_codes.USAGE)
     try:
-        cfg = embedding.CFConfig.from_env(model=model)
-    except RuntimeError as e:
+        backend_r, model_r, base_url_r = config.resolve_embedding(backend, model, base_url, paths.EXPORT_ROOT)
+        embedder = embedding.make_embedder(backend_r, model=model_r, base_url=base_url_r)
+    except embedding.EmbeddingConfigError as e:
         olog.error("embed_config", error=str(e))
         raise typer.Exit(exit_codes.CONFIG) from e
-
-    embedder = embedding.CloudflareEmbedder(cfg)
 
     async def _orchestrate() -> embedding.EmbedStats:
         shutdown.install(asyncio.get_running_loop())
@@ -545,7 +554,17 @@ def search(
     kind: Annotated[str | None, typer.Option(
         "--kind", help="Filter to 'conversation' or 'summary'. Default: both.",
     )] = None,
-    model: Annotated[str, typer.Option("--model")] = "@cf/baai/bge-m3",
+    backend: Annotated[str | None, typer.Option(
+        "--backend", help="Embedding backend: cloudflare, ollama, or openai. "
+        "Default from $CSINDEX_EMBED_BACKEND / reindex.toml [embedding].backend.",
+    )] = None,
+    model: Annotated[str | None, typer.Option(
+        "--model", help="Embedding model. Default: backend-specific default when omitted.",
+    )] = None,
+    base_url: Annotated[str | None, typer.Option(
+        "--base-url", help="Base URL for the openai/ollama backends. "
+        "Default from $CSINDEX_EMBED_BASE_URL / reindex.toml [embedding].base_url.",
+    )] = None,
     persist: Annotated[str | None, typer.Option("--persist")] = None,
     no_color: Annotated[bool, typer.Option("--no-color")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
@@ -560,12 +579,11 @@ def search(
     _common_setup("debug" if verbose else "warn", None, no_color, no_log_file=True)
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
     try:
-        cfg = embedding.CFConfig.from_env(model=model)
-    except RuntimeError as e:
+        backend_r, model_r, base_url_r = config.resolve_embedding(backend, model, base_url, paths.EXPORT_ROOT)
+        embedder = embedding.make_embedder(backend_r, model=model_r, base_url=base_url_r)
+    except embedding.EmbeddingConfigError as e:
         log.get("orchestrator").error("search_config", error=str(e))
         raise typer.Exit(exit_codes.CONFIG) from e
-
-    embedder = embedding.CloudflareEmbedder(cfg)
 
     async def _run() -> list[dict]:
         try:

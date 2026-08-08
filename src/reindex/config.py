@@ -152,13 +152,20 @@ def coerce_provider_name(value: str | ProviderName) -> ProviderName:
         ) from e
 
 
-def _read_toml(export_root: Path) -> dict[str, Any]:
+def _read_toml_raw(export_root: Path) -> dict[str, Any]:
+    """Parse `reindex.toml` at the export root (or `{}` if absent), full
+    top-level table. Callers slice into whichever section they need — the
+    `[reindex]` table (`_read_toml`) or the top-level `[embedding]` table
+    (`resolve_embedding`) — without re-parsing the file."""
     f = export_root / "reindex.toml"
     if not f.is_file():
         return {}
     with f.open("rb") as fh:
-        data = tomllib.load(fh)
-    return data.get("reindex", {})
+        return tomllib.load(fh)
+
+
+def _read_toml(export_root: Path) -> dict[str, Any]:
+    return _read_toml_raw(export_root).get("reindex", {})
 
 
 def resolve_provider_name(
@@ -212,3 +219,28 @@ def load(export_root: Path, *, provider_name: str | ProviderName | None = None) 
     options.update({k: v for k, v in toml_section.items() if k not in ("models", "pricing")})
 
     return ProviderConfig(name=name, models=tiers, pricing=pricing, options=options)
+
+
+def resolve_embedding(
+    cli_backend: str | None,
+    cli_model: str | None,
+    cli_base_url: str | None,
+    root: Path,
+) -> tuple[str, str | None, str | None]:
+    """Backend/model/base_url for the embed/search commands, precedence
+    CLI flag > $CSINDEX_EMBED_* > top-level `[embedding]` table in
+    reindex.toml. Raises embedding.EmbeddingConfigError when no backend is
+    configured anywhere."""
+    from reindex import embedding as _e
+
+    toml_cfg = _read_toml_raw(root).get("embedding", {})
+    backend = cli_backend or os.environ.get("CSINDEX_EMBED_BACKEND") or toml_cfg.get("backend")
+    model = cli_model or os.environ.get("CSINDEX_EMBED_MODEL") or toml_cfg.get("model")
+    base_url = cli_base_url or os.environ.get("CSINDEX_EMBED_BASE_URL") or toml_cfg.get("base_url")
+    if not backend:
+        raise _e.EmbeddingConfigError(
+            "No embedding backend configured. Set one of: --backend flag, "
+            "$CSINDEX_EMBED_BACKEND, or [embedding].backend in reindex.toml. "
+            "Backends: cloudflare, ollama, openai."
+        )
+    return backend, model, base_url

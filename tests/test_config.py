@@ -146,3 +146,29 @@ def test_compute_cost_empty_pricing_is_silent_free(tmp_path: Path):
     cfg = config.load(tmp_path, provider_name="ollama")
     assert cfg.compute_cost("llama3.2", 1_000_000, 1_000_000) == 0.0
     assert cfg._warned_models == set()
+
+
+# ---------------------------------------------------------------------------
+# resolve_embedding: backend/model/base_url precedence (CLI > env > toml)
+# ---------------------------------------------------------------------------
+
+def test_resolve_embedding_precedence(tmp_path, monkeypatch):
+    (tmp_path / "reindex.toml").write_text(
+        '[embedding]\nbackend = "cloudflare"\nmodel = "toml-model"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    monkeypatch.setenv("CSINDEX_EMBED_MODEL", "env-model")
+    from reindex import config
+    # CLI beats env beats toml
+    assert config.resolve_embedding("openai", "cli-model", None, tmp_path)[:2] == ("openai", "cli-model")
+    assert config.resolve_embedding(None, None, None, tmp_path)[:2] == ("ollama", "env-model")
+    monkeypatch.delenv("CSINDEX_EMBED_BACKEND")
+    monkeypatch.delenv("CSINDEX_EMBED_MODEL")
+    assert config.resolve_embedding(None, None, None, tmp_path)[:2] == ("cloudflare", "toml-model")
+
+
+def test_resolve_embedding_unconfigured_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
+    from reindex import config, embedding
+    with pytest.raises(embedding.EmbeddingConfigError, match="cloudflare, ollama, openai"):
+        config.resolve_embedding(None, None, None, tmp_path)
