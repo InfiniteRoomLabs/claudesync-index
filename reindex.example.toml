@@ -59,3 +59,10 @@ root = "llama3.2"
 leaf = "google/gemini-2.5-flash"
 project = "google/gemini-2.5-flash"
 root = "google/gemini-2.5-flash"
+
+# --- embed / search (optional, needs the [embed] extra) ---
+
+# [embedding]
+# backend = "ollama"            # cloudflare | ollama | openai (no default; required for embed/search)
+# model = "nomic-embed-text"    # backend-specific default applies when omitted
+# base_url = "http://127.0.0.1:11434"  # openai/ollama only; cloudflare derives from account
