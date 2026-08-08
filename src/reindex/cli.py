@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -71,6 +74,15 @@ def _require_root_or_exit() -> Path:
     except paths.InvalidExportTree as exc:
         typer.secho(str(exc), err=True, fg=typer.colors.RED)
         raise typer.Exit(exit_codes.DATAERR) from exc
+
+
+def _preflight_claude_binary() -> None:
+    """quick-mode only: it shells out to `claude -p` directly."""
+    if shutil.which("claude") is not None:
+        return
+    print("csindex: missing required commands: claude", file=sys.stderr)
+    print("    claude: https://claude.com/claude-code", file=sys.stderr)
+    sys.exit(exit_codes.CONFIG)
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +283,58 @@ def _gather_leaves(scope: str, limit: int) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+
+@app.command()
+def quick(
+    root: Annotated[Path | None, typer.Option(
+        "--root", help="Claudesync export tree (default: $CSINDEX_ROOT, then CWD). "
+        "Also accepted before the subcommand: `csindex --root PATH quick ...`.",
+    )] = None,
+    log_file: Annotated[str | None, typer.Option("--log-file")] = None,
+    no_log_file: Annotated[bool, typer.Option("--no-log-file")] = False,
+    log_level: Annotated[str | None, typer.Option("--log-level")] = None,
+    log_format: Annotated[str | None, typer.Option("--log-format")] = None,
+    no_color: Annotated[bool, typer.Option("--no-color")] = False,
+    json_logs: Annotated[bool, typer.Option("--json")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+) -> None:
+    """Counts + top README/METADATA only (cheap, subscription-only)."""
+    if root is not None:
+        paths.set_requested_root(root)
+    _require_root_or_exit()
+
+    if json_logs:
+        log_format = "json"
+    if quiet:
+        log_level = "warn"
+    if verbose:
+        log_level = "debug"
+    _common_setup(log_level, log_format, no_color,
+                  log_file=log_file, no_log_file=no_log_file)
+    _preflight_claude_binary()
+
+    olog = log.get("orchestrator")
+    prompt = prompt_loader.load_prompt("quick").replace("{{EXPORT_DIR}}", str(paths.EXPORT_ROOT))
+    try:
+        with single_instance(paths.EXPORT_ROOT):
+            proc = subprocess.run(
+                [
+                    "claude", "-p",
+                    "--permission-mode", "acceptEdits",
+                    "--add-dir", str(paths.EXPORT_ROOT),
+                    "--output-format", "json",
+                ],
+                input=prompt,
+                text=True,
+            )
+    except RuntimeError as e:
+        olog.error("lock_failed", error=str(e))
+        raise typer.Exit(exit_codes.TEMPFAIL) from e
+    if proc.returncode != 0:
+        raise typer.Exit(exit_codes.UNAVAILABLE)
+    raise typer.Exit(exit_codes.OK)
+
 
 @app.command()
 def full(

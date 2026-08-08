@@ -501,3 +501,60 @@ def test_search_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, t
 
     res = runner.invoke(cli.app, ["search", "anything", "--persist", str(persist_dir)])
     assert res.exit_code == exit_codes.DATAERR
+
+
+def test_embed_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, tmp_path):
+    """Mirrors test_search_collection_identity_mismatch_exits_65 for the embed
+    side: a store opened under one backend/model, embedded against another,
+    must fail loudly (exit 65) rather than silently corrupting the vector
+    space. Uses ollama (no creds needed) and never reaches the network:
+    open_collection raises CollectionMismatch before embed_corpus embeds
+    anything."""
+    from reindex import embedding
+
+    persist_dir = tmp_path / "vdb"
+    embedding.open_collection(persist_dir, backend="ollama", model="m1")
+
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    monkeypatch.setenv("CSINDEX_EMBED_MODEL", "m2")
+
+    res = runner.invoke(cli.app, ["embed", "--persist", str(persist_dir)])
+    assert res.exit_code == exit_codes.DATAERR
+
+
+# ---------------------------------------------------------------------------
+# quick: claude-cli refresh with packaged prompt
+# ---------------------------------------------------------------------------
+
+def test_quick_help_works_outside_export_tree(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(cli.app, ["quick", "--help"]).exit_code == 0
+
+
+def test_quick_invalid_root_exits_65(tmp_path):
+    result = runner.invoke(cli.app, ["quick", "--root", str(tmp_path)])
+    assert result.exit_code == exit_codes.DATAERR
+
+
+def test_quick_missing_claude_binary_exits_78(tmp_export, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    result = runner.invoke(cli.app, ["quick"])
+    assert result.exit_code == exit_codes.CONFIG
+
+
+def test_quick_pipes_packaged_prompt_to_claude(tmp_export, monkeypatch):
+    calls = {}
+
+    def fake_run(argv, **kw):
+        calls["argv"] = argv
+        calls["input"] = kw.get("input", "")
+        import subprocess
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = runner.invoke(cli.app, ["quick"])
+    assert result.exit_code == 0
+    assert calls["argv"][0] == "claude"
+    assert "{{EXPORT_DIR}}" not in calls["input"]
+    assert "METADATA.json" in calls["input"]
