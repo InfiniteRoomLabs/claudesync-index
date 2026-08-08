@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
@@ -370,3 +371,230 @@ def test_full_root_flag_invalid_tree_exits_65(tmp_path):
 def test_help_works_outside_export_tree(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert runner.invoke(cli.app, ["full", "--help"]).exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Embedding commands (embed / search / embed-migrate)
+# ---------------------------------------------------------------------------
+
+def test_embed_help_works_outside_export_tree(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(cli.app, ["embed", "--help"]).exit_code == 0
+    assert runner.invoke(cli.app, ["search", "--help"]).exit_code == 0
+    assert runner.invoke(cli.app, ["embed-migrate", "--help"]).exit_code == 0
+
+
+def test_embed_invalid_root_exits_65(tmp_path):
+    result = runner.invoke(cli.app, ["embed", "--root", str(tmp_path)])
+    assert result.exit_code == exit_codes.DATAERR
+
+
+def test_search_invalid_root_exits_65(tmp_path):
+    result = runner.invoke(cli.app, ["search", "anything", "--root", str(tmp_path)])
+    assert result.exit_code == exit_codes.DATAERR
+
+
+def test_embed_both_no_flags_exits_usage(tmp_export):
+    """--no-conversations + --no-summaries is checked before CF creds, so no
+    env setup needed here."""
+    res = runner.invoke(cli.app, ["embed", "--no-conversations", "--no-summaries"])
+    assert res.exit_code == exit_codes.USAGE
+
+
+def test_embed_missing_cf_creds_exits_config(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.delenv("CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CF_API_TOKEN", raising=False)
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    res = runner.invoke(cli.app, ["embed"])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "CF_ACCOUNT_ID" in res.output
+
+
+def test_search_missing_cf_creds_exits_config(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.delenv("CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CF_API_TOKEN", raising=False)
+    res = runner.invoke(cli.app, ["search", "anything"])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "CF_ACCOUNT_ID" in res.output
+
+
+def test_embed_e2e_success(tmp_export, make_conv, monkeypatch):
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+    make_conv("alpha")
+
+    from reindex import embedding
+    stats = embedding.EmbedStats(files=1, chunks=2, skipped=0, failed=0)
+    corpus_mock = AsyncMock(return_value=stats)
+    monkeypatch.setattr(embedding, "embed_corpus", corpus_mock)
+
+    res = runner.invoke(cli.app, ["embed", "--no-summaries", "--persist", "custom-vdb"])
+    assert res.exit_code == exit_codes.OK
+    assert corpus_mock.await_count == 1
+    # persist_dir resolved relative to the passed --persist value.
+    assert corpus_mock.await_args is not None
+    called_persist_dir = corpus_mock.await_args.args[1]
+    assert called_persist_dir == Path("custom-vdb")
+
+
+def test_embed_e2e_reports_failures_as_tempfail(tmp_export, monkeypatch):
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+
+    from reindex import embedding
+    stats = embedding.EmbedStats(files=0, chunks=0, skipped=0, failed=1)
+    monkeypatch.setattr(embedding, "embed_corpus", AsyncMock(return_value=stats))
+
+    res = runner.invoke(cli.app, ["embed"])
+    assert res.exit_code == exit_codes.TEMPFAIL
+
+
+def test_search_e2e_success(tmp_export, monkeypatch):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+
+    from reindex import embedding
+    hits = [{"score": 0.876, "slug": "conversations/alpha", "kind": "conversation", "text": "hello world", "meta": {}}]
+    search_mock = AsyncMock(return_value=hits)
+    monkeypatch.setattr(embedding, "search", search_mock)
+
+    res = runner.invoke(cli.app, ["search", "hello", "--k", "1"])
+    assert res.exit_code == exit_codes.OK
+    assert search_mock.await_count == 1
+    assert "conversations/alpha" in res.stdout
+    assert "hello world" in res.stdout
+
+
+def test_embed_migrate_e2e_success(tmp_export, monkeypatch):
+    from reindex import embedding
+    monkeypatch.setattr(embedding, "backfill_kind", lambda persist_dir: 3)
+
+    res = runner.invoke(cli.app, ["embed-migrate", "--persist", "custom-vdb"])
+    assert res.exit_code == exit_codes.OK
+
+
+def test_embed_unconfigured_backend_exits_78(tmp_export, monkeypatch):
+    monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
+    result = runner.invoke(cli.app, ["embed"])
+    assert result.exit_code == exit_codes.CONFIG
+
+
+def test_search_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, tmp_path):
+    """A collection embedded under one backend/model, queried under another,
+    must fail loudly (exit 65) rather than silently return nonsense hits.
+    Uses ollama (no creds needed) and never reaches the network: open_collection
+    raises CollectionMismatch before search() embeds the query."""
+    from reindex import embedding
+
+    persist_dir = tmp_path / "vdb"
+    embedding.open_collection(persist_dir, backend="ollama", model="m1")
+
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    monkeypatch.setenv("CSINDEX_EMBED_MODEL", "m2")
+
+    res = runner.invoke(cli.app, ["search", "anything", "--persist", str(persist_dir)])
+    assert res.exit_code == exit_codes.DATAERR
+
+
+def test_embed_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, tmp_path):
+    """Mirrors test_search_collection_identity_mismatch_exits_65 for the embed
+    side: a store opened under one backend/model, embedded against another,
+    must fail loudly (exit 65) rather than silently corrupting the vector
+    space. Uses ollama (no creds needed) and never reaches the network:
+    open_collection raises CollectionMismatch before embed_corpus embeds
+    anything."""
+    from reindex import embedding
+
+    persist_dir = tmp_path / "vdb"
+    embedding.open_collection(persist_dir, backend="ollama", model="m1")
+
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    monkeypatch.setenv("CSINDEX_EMBED_MODEL", "m2")
+
+    res = runner.invoke(cli.app, ["embed", "--persist", str(persist_dir)])
+    assert res.exit_code == exit_codes.DATAERR
+
+
+# ---------------------------------------------------------------------------
+# Missing chromadb (embed extra not installed) -- exit 78 CONFIG, not a
+# buried SOFTWARE(70) log or a raw traceback. See EmbeddingConfigError.
+# ---------------------------------------------------------------------------
+
+def _block_chromadb_import(monkeypatch):
+    """`import chromadb` raises ImportError even though the real package is
+    installed in this venv: a `None` entry in sys.modules halts the import
+    machinery before the finder ever runs (documented CPython behavior)."""
+    import sys
+    monkeypatch.setitem(sys.modules, "chromadb", None)
+
+
+def test_embed_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["embed", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+def test_search_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["search", "anything", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+def test_embed_migrate_missing_chromadb_exits_config(tmp_export, monkeypatch, tmp_path):
+    _block_chromadb_import(monkeypatch)
+
+    res = runner.invoke(cli.app, ["embed-migrate", "--persist", str(tmp_path / "vdb")])
+    assert res.exit_code == exit_codes.CONFIG
+    assert "Install the embed extra" in res.output
+
+
+# ---------------------------------------------------------------------------
+# quick: claude-cli refresh with packaged prompt
+# ---------------------------------------------------------------------------
+
+def test_quick_help_works_outside_export_tree(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(cli.app, ["quick", "--help"]).exit_code == 0
+
+
+def test_quick_invalid_root_exits_65(tmp_path):
+    result = runner.invoke(cli.app, ["quick", "--root", str(tmp_path)])
+    assert result.exit_code == exit_codes.DATAERR
+
+
+def test_quick_missing_claude_binary_exits_127(tmp_export, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    result = runner.invoke(cli.app, ["quick"])
+    assert result.exit_code == exit_codes.NOT_FOUND
+
+
+def test_quick_pipes_packaged_prompt_to_claude(tmp_export, monkeypatch):
+    calls = {}
+
+    def fake_run(argv, **kw):
+        calls["argv"] = argv
+        calls["input"] = kw.get("input", "")
+        import subprocess
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = runner.invoke(cli.app, ["quick"])
+    assert result.exit_code == 0
+    assert calls["argv"][0] == "claude"
+    assert "{{EXPORT_DIR}}" not in calls["input"]
+    assert "METADATA.json" in calls["input"]

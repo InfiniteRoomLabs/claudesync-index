@@ -57,6 +57,41 @@ Each level's `INDEX.md` stamps a content hash of its inputs. On the next run, an
 
 If a provider call fails in a retryable way (malformed structured output, a parse failure), the runner retries once against that provider's configured `escalation` model — a stronger model for the cases the normal tier can't handle. Escalation is per-provider and configurable in `reindex.toml`. The root step never escalates — it already runs the strongest configured model, so retrying "up" would be a downgrade.
 
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `csindex full` | The main pipeline — leaves -> projects -> root, as described above. |
+| `csindex quick` | A cheap README/METADATA.json-only refresh via the `claude` CLI. Claude Code CLI subscribers only. |
+| `csindex embed` | Embed conversation.md/INDEX.md contents into a local vector DB. Requires the `[embed]` extra. |
+| `csindex search` | Semantic search over the embedded corpus. Requires the `[embed]` extra. |
+| `csindex embed-migrate` | One-shot metadata backfill for collections embedded before the `kind` tag existed. Requires the `[embed]` extra. |
+| `csindex repair-hashes` | Repair cache-key hashes after schema changes. |
+| `csindex batches` | Inspect and manage pending Message Batches state (`list`/`show`/`cancel`/`purge`/`resume`). |
+
+`quick` shells out to `claude -p` directly — it needs an authenticated `claude` binary on `PATH` and consumes your Claude Pro/Max subscription quota, not a separate API charge. It reads and writes only `README.md` and `METADATA.json` at the export root. The prompt it sends is packaged as `quick.md`; override it like any other template with `--prompts-dir`.
+
+## Semantic search (optional)
+
+`embed`/`search`/`embed-migrate` need the `[embed]` extra (`chromadb`):
+
+```sh
+uv tool install 'claudesync-index[embed]'
+# or: pip install 'claudesync-index[embed]'
+```
+
+Both `embed` and `search` need an embedding backend — there's no default, so an unconfigured run exits `78` (`CONFIG`). Configure one via `--backend`, `$CSINDEX_EMBED_BACKEND`, or `[embedding].backend` in `reindex.toml` (see [`reindex.example.toml`](reindex.example.toml)):
+
+| Backend | Setup | Default model |
+|---|---|---|
+| `cloudflare` | `CF_ACCOUNT_ID` + `CF_API_TOKEN` env vars (Workers AI). | `@cf/baai/bge-m3` |
+| `openai` | Any OpenAI-compatible `/v1/embeddings` server. `CSINDEX_EMBED_API_KEY`, falling back to `OPENAI_API_KEY`; optional for local servers that don't check auth. | `text-embedding-3-small` |
+| `ollama` | Native `/api/embed` endpoint, no auth. Defaults to `http://127.0.0.1:11434`. | `nomic-embed-text` |
+
+`--base-url` / `$CSINDEX_EMBED_BASE_URL` / `[embedding].base_url` override the endpoint for `openai`/`ollama` (cloudflare derives its endpoint from the account id). `--model` / `$CSINDEX_EMBED_MODEL` / `[embedding].model` override the model.
+
+Vectors persist to `<export root>/.vector-db` by default (`--persist` to override). A collection is stamped with the backend and model it was embedded with: switching backends or models means wiping `.vector-db/` and re-embedding — mixing vector spaces in one collection would corrupt search silently, so `csindex` fails loudly (exit `65`) instead.
+
 ## Config
 
 Optional `reindex.toml` at the export root overrides provider selection, model tiers, and pricing — see [`reindex.example.toml`](reindex.example.toml) for the full annotated shape. Copy it in and edit.
@@ -74,6 +109,9 @@ Environment variables:
 | `CSINDEX_FAILURE_LOG` | Path to the JSONL failure log. Defaults to `<export>/.reindex-failures.jsonl`. |
 | `CSINDEX_LOG_FILE` | Path to the JSONL run log. Defaults to `<export>/.reindex.log.jsonl`; disable with `--no-log-file`. |
 | `LOG_FORMAT` | `human` (default on a TTY) or `json` (default otherwise) for stderr log rendering. |
+| `CSINDEX_EMBED_BACKEND` | Embedding backend for `embed`/`search` (`cloudflare`, `openai`, or `ollama`) — no default, see [Semantic search](#semantic-search-optional). |
+| `CSINDEX_EMBED_MODEL` | Embedding model override. Defaults to a backend-specific model when omitted. |
+| `CSINDEX_EMBED_BASE_URL` | Base URL override for the `openai`/`ollama` embedding backends. |
 
 `--prompts-dir PATH` overrides individual prompt templates with your own — any template name not present in the directory falls back to the packaged default.
 

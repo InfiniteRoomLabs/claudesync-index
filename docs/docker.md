@@ -11,6 +11,8 @@ The published image (`ghcr.io/infiniteroomlabs/claudesync-index`) runs `csindex`
 | `claude-cli` | Needs wiring | Requires an authenticated `claude` binary and its config directory. Mount your host's `~/.claude` read-only into the container, e.g. `-v "$HOME/.claude:/home/csindex/.claude:ro"`. |
 | `opencode` | Needs wiring | Same pattern as `claude-cli` — mount wherever `opencode`'s auth lives (e.g. `~/.local/share/opencode`) read-only. |
 
+`embed`/`search`/`embed-migrate` need the `[embed]` extra (`chromadb`), which the published image does not install — those commands aren't usable in the container as shipped.
+
 ## Run
 
 ```sh

@@ -14,9 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and defining `test`/`lint`/`build`/`docker-build` tasks, MIT `LICENSE`, and `.gitignore`.
 - Indexer core imported from the private source repo: `src/reindex/*.py` (CLI, batch runner,
   providers for claude-cli/anthropic/ollama/opencode, hashing, models, config, logging) plus
-  the matching `tests/` suite (338 tests, all green). The `quick` command, the `work` sub-app
-  (`workflow_cli.py`), and `embed`/`search`/`embed-migrate` (`embedding.py`) were left behind —
-  cut from the public v1 surface per the extraction plan.
+  the matching `tests/` suite (338 tests, all green). The `work` sub-app (`workflow_cli.py`)
+  was left behind — cut from the public v1 surface per the extraction plan (`quick` and
+  `embed`/`search`/`embed-migrate` were restored later, see below).
 
 - Runtime export-root selection: `csindex [--root PATH] full ...` / `$CSINDEX_ROOT` / CWD
   fallback, replacing import-time root resolution in `reindex.paths`. Precedence is
@@ -59,6 +59,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ruff linting and pytest coverage gating at 85%; smoke job validates wheel and sdist
   CLI invocations via `uvx`. Also supports `workflow_call` for reuse by the release
   workflow (Task 11).
+- `csindex quick` restored: a `claude -p` subprocess refresh limited to `README.md` and
+  `METADATA.json` at the export root — Claude Code CLI subscribers only, no separate API
+  charge. Requires an authenticated `claude` binary on `PATH`; a missing binary exits `127`
+  (`NOT_FOUND`). Its prompt ships packaged as `quick.md`, overridable via `--prompts-dir`
+  like the other templates.
+- `csindex embed`/`search`/`embed-migrate` restored behind a new `[embed]` optional
+  dependency extra (`chromadb`). `embed` chunks and embeds `conversation.md`/`INDEX.md`
+  contents into a local persistent Chroma collection; `search` queries it; `embed-migrate`
+  is a one-shot metadata backfill for collections embedded before the `kind` tag existed.
+- Three-backend embedding abstraction (an `Embedder` protocol in `embedding.py`):
+  `cloudflare` (Workers AI bge-m3, via `CF_ACCOUNT_ID`/`CF_API_TOKEN`), `openai` (any
+  OpenAI-compatible `/v1/embeddings` server, via `CSINDEX_EMBED_API_KEY` falling back to
+  `OPENAI_API_KEY`), and `ollama` (native `/api/embed`, no auth, defaults to
+  `http://127.0.0.1:11434`). Backend/model/base_url resolve as CLI flag >
+  `$CSINDEX_EMBED_*` env var > `[embedding]` table in `reindex.toml`, with no built-in
+  default backend — an unconfigured `embed`/`search` call exits `78` (`CONFIG`).
+- Collection identity guard: a Chroma collection is now stamped with the backend and model
+  it was embedded with. A later `embed`/`search` call against a different backend or model
+  exits `65` (`DATAERR`) instead of silently mixing vector spaces; the remedy is deleting
+  the persist dir and re-embedding.
 
 ### Removed
 - `fnox.toml` and `fnox` from `mise.toml` `[tools]` — API-key injection via fnox is unused; contributors export `ANTHROPIC_API_KEY` directly.
@@ -90,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing (`$XDG_CONFIG_HOME/opencode/agent/quick.md`, falling back to `~/.config`)
   instead of being hardcoded — a fresh install now runs against opencode's default agent
   with a one-line warning instead of requiring the file to be pre-configured.
+- `embed`/`search`/`embed-migrate`: a missing `chromadb` (embed extra not installed) now
+  exits 78 CONFIG with the "Install the embed extra" hint on all three commands, instead
+  of a buried exit-70 log (`embed`) or a raw traceback at exit 1 (`search`,
+  `embed-migrate`). `get_collection`/`open_collection` now raise `EmbeddingConfigError`
+  (a `RuntimeError` subclass) instead of a bare `RuntimeError` for the lazy chromadb
+  import, and `embed-migrate` gained the config-error handler it was missing entirely.
 
 ### Docs
 - `TODO.md`: Project backlog documenting plans to generalize `quick`/`work`/`embed` features from the private upstream repo for public use, with configurable embedding backends and zero machine-specific assumptions.
