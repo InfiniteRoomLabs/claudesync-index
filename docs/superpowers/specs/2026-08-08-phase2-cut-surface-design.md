@@ -45,8 +45,7 @@ Credentials are env-only, never toml: `CF_ACCOUNT_ID` + `CF_API_TOKEN` (cloudfla
 Chroma collections are dimension-bound; querying a bge-m3 (1024-dim) collection with nomic-embed-text (768-dim) vectors fails or, worse, silently degrades across models of equal dimension. Guard:
 
 - On collection creation, stamp `{"embed_backend": ..., "embed_model": ...}` into collection metadata.
-- On every `embed`/`search` open, compare stamped backend+model to the active config. Mismatch -> exit 65 DATAERR with a message naming both sides and the two remedies (`--force` re-embed after wiping, or switch config back). `embed-migrate` needs no embedder (pure Chroma metadata backfill), so it neither requires backend config nor runs the guard.
-- Legacy collections without the stamp (created by the private tool) get stamped on first successful `embed` run and are treated as matching until then; `search` against an unstamped collection warns once.
+- On every `embed`/`search` open, compare stamped backend+model to the active config. Mismatch (or a pre-existing unstamped collection) -> exit 65 DATAERR with one remedy: delete the persist dir and re-embed. Switching backends/models costs a full re-embed, by design — this ships as a "you know what you're getting into" tool, and the guard exists only to make the failure loud instead of silently corrupt. `embed-migrate` needs no embedder (pure Chroma metadata backfill), so it neither requires backend config nor runs the guard.
 
 ### `quick`
 
@@ -76,7 +75,7 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 |---|---|---|
 | No backend configured | 78 | names all three backends and the three config channels |
 | Missing creds for chosen backend | 78 | backend-specific (which env vars) |
-| Collection/model mismatch | 65 | both models named + two remedies |
+| Collection/model mismatch or unstamped collection | 65 | both models named + single remedy (wipe persist dir, re-embed) |
 | chromadb not installed | 78 | `pip install "claudesync-index[embed]"` / uv equivalent |
 | Transient backend HTTP | retried, then per-source failure count | unchanged upstream semantics |
 | `claude` binary missing (quick) | 78 | install hint |
@@ -85,7 +84,7 @@ Restored as-is in behavior: pipe a prompt into `claude -p` under the export-root
 
 Same gates as phase 1: TDD, suite green, coverage >= 85%, ruff clean, provenance grep clean.
 
-- `tests/test_embedding.py`: adapt upstream tests (CF mechanics, chunking, content-hash skip, per-source isolation); add backend-selection tests (config precedence, missing-backend exit 78) and the compatibility-guard tests (mismatch exit 65, legacy stamp-on-embed, search warn).
+- `tests/test_embedding.py`: adapt upstream tests (CF mechanics, chunking, content-hash skip, per-source isolation); add backend-selection tests (config precedence, missing-backend exit 78) and compatibility-guard tests (mismatch and unstamped both exit 65).
 - Contract-style tests for `OpenAIEmbedder`/`OllamaEmbedder` with mocked httpx (request shape, auth header presence/absence, response parsing, transient retry), mirroring `test_provider_*` conventions.
 - `tests/test_cli.py` additions: `quick` help/root-guard/missing-binary tests; `embed`/`search`/`embed-migrate` wired with a fake embedder.
 - Docs: README providers/config sections gain the embedding table + quick; `reindex.example.toml` gains `[embedding]`; all new command examples `--help`-verified. Provenance + no-.env + no-hard-wrap rules apply to everything copied or written.
