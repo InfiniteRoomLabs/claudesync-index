@@ -514,6 +514,7 @@ def embed(
         try:
             return await embedding.embed_corpus(
                 paths.EXPORT_ROOT, persist_dir, embedder=embedder,
+                backend=backend_r, model=embedder.model,
                 limit=limit, max_chars=chunk_chars, overlap=overlap,
                 force=force, max_in_flight=max_in_flight,
                 conversations=not no_conversations, summaries=not no_summaries,
@@ -534,6 +535,9 @@ def embed(
             except asyncio.CancelledError:
                 olog.warn("shutdown_complete", reason="sigint")
                 exit_code = 130
+            except embedding.CollectionMismatch as e:
+                olog.error("embed_collection_mismatch", error=str(e))
+                exit_code = exit_codes.DATAERR
             except RuntimeError as e:
                 olog.error("embed_failed", error=str(e)[:500])
                 exit_code = exit_codes.SOFTWARE
@@ -587,11 +591,19 @@ def search(
 
     async def _run() -> list[dict]:
         try:
-            return await embedding.search(persist_dir, query, embedder=embedder, k=k, kind=kind)
+            return await embedding.search(
+                persist_dir, query, embedder=embedder,
+                backend=backend_r, model=embedder.model, k=k, kind=kind,
+            )
         finally:
             await embedder.aclose()
 
-    hits = asyncio.run(_run())
+    try:
+        hits = asyncio.run(_run())
+    except embedding.CollectionMismatch as e:
+        log.get("orchestrator").error("search_collection_mismatch", error=str(e))
+        raise typer.Exit(exit_codes.DATAERR) from e
+
     for h in hits:
         snippet = " ".join(h["text"].split())[:200]
         print(f"\n[{h['score']:.3f}] ({h['kind']}) {h['slug']}\n  {snippet}")

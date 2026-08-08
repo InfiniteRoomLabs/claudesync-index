@@ -437,6 +437,41 @@ def get_collection(persist_dir: Path, name: str = "conversations"):
     return client.get_or_create_collection(name, metadata={"hnsw:space": "cosine"})
 
 
+class CollectionMismatch(RuntimeError):
+    """Existing collection was embedded with a different backend/model."""
+
+
+def open_collection(persist_dir: Path, *, backend: str, model: str, name: str = "conversations"):
+    """get_collection plus an identity guard. Chroma collections are bound to
+    one embedding model's vector space; mixing models corrupts search silently,
+    so mismatch (or a legacy unstamped collection) fails loudly instead."""
+    try:
+        import chromadb  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RuntimeError(
+            "chromadb not installed. Install the embed extra: uv sync --extra embed "
+            "(or pip install 'claudesync-index[embed]')."
+        ) from e
+    client = chromadb.PersistentClient(path=str(persist_dir))
+    stamp = {"embed_backend": backend, "embed_model": model, "hnsw:space": "cosine"}
+    try:
+        col = client.get_collection(name)
+    except Exception:
+        # Chroma's not-found exception type has churned across versions
+        # (currently chromadb.errors.NotFoundError, >=1.5.9) — catch broadly
+        # rather than pin to a class that may move again.
+        return client.create_collection(name, metadata=stamp)
+    meta = col.metadata or {}
+    if meta.get("embed_backend") != backend or meta.get("embed_model") != model:
+        have = f"{meta.get('embed_backend')}/{meta.get('embed_model')}"
+        raise CollectionMismatch(
+            f"Collection at {persist_dir} was embedded with {have}, but the active "
+            f"config is {backend}/{model}. Delete the persist dir and re-embed "
+            "(switching backends or models costs a full re-embed)."
+        )
+    return col
+
+
 @dataclass
 class EmbedStats:
     files: int = 0
@@ -491,6 +526,8 @@ async def embed_corpus(
     persist_dir: Path,
     *,
     embedder: Embedder,
+    backend: str,
+    model: str,
     limit: int = 0,
     max_chars: int = DEFAULT_CHUNK_CHARS,
     overlap: int = DEFAULT_OVERLAP_CHARS,
@@ -518,7 +555,7 @@ async def embed_corpus(
       * clean replace — changed sources drop prior chunks for their (slug, kind)
         before writing, so a shrunk file leaves no orphans. `force` busts it.
     """
-    col = get_collection(persist_dir)
+    col = open_collection(persist_dir, backend=backend, model=model)
     olog = log.get("embed")
     stats = EmbedStats()
     controller = shutdown.get()
@@ -602,12 +639,14 @@ async def search(
     query: str,
     *,
     embedder: Embedder,
+    backend: str,
+    model: str,
     k: int = 5,
     kind: str | None = None,
 ) -> list[dict]:
     """Embed the query and return the k nearest chunks (text + metadata + score).
     `kind` filters to "conversation" or "summary"; None searches both."""
-    col = get_collection(persist_dir)
+    col = open_collection(persist_dir, backend=backend, model=model)
     qvec = (await embedder.embed([query]))[0]
     where = {"kind": kind} if kind else None
     res = col.query(query_embeddings=[qvec], n_results=k, where=where)

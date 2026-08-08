@@ -484,3 +484,20 @@ def test_embed_unconfigured_backend_exits_78(tmp_export, monkeypatch):
     monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
     result = runner.invoke(cli.app, ["embed"])
     assert result.exit_code == exit_codes.CONFIG
+
+
+def test_search_collection_identity_mismatch_exits_65(tmp_export, monkeypatch, tmp_path):
+    """A collection embedded under one backend/model, queried under another,
+    must fail loudly (exit 65) rather than silently return nonsense hits.
+    Uses ollama (no creds needed) and never reaches the network: open_collection
+    raises CollectionMismatch before search() embeds the query."""
+    from reindex import embedding
+
+    persist_dir = tmp_path / "vdb"
+    embedding.open_collection(persist_dir, backend="ollama", model="m1")
+
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "ollama")
+    monkeypatch.setenv("CSINDEX_EMBED_MODEL", "m2")
+
+    res = runner.invoke(cli.app, ["search", "anything", "--persist", str(persist_dir)])
+    assert res.exit_code == exit_codes.DATAERR

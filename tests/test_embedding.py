@@ -239,39 +239,48 @@ async def test_embed_corpus_skips_unchanged_and_search_finds_it(tmp_export, make
     make_conv("alpha", "This is a test conversation about widgets and gadgets.")
     persist_dir = tmp_path / "vdb"
     embedder = _FakeEmbedder()
+    identity = {"backend": "cloudflare", "model": "fake-model"}
 
-    stats = await embedding.embed_corpus(tmp_export, persist_dir, embedder=embedder, summaries=False)
+    stats = await embedding.embed_corpus(
+        tmp_export, persist_dir, embedder=embedder, summaries=False, **identity,
+    )
     assert stats.files == 1
     assert stats.chunks >= 1
     assert stats.skipped == 0
     assert stats.failed == 0
 
     # Unchanged content on a second pass -> content-hash skip, no re-embed.
-    stats2 = await embedding.embed_corpus(tmp_export, persist_dir, embedder=embedder, summaries=False)
+    stats2 = await embedding.embed_corpus(
+        tmp_export, persist_dir, embedder=embedder, summaries=False, **identity,
+    )
     assert stats2.files == 0
     assert stats2.skipped == 1
 
     # force=True busts the cache even though content is unchanged.
     stats3 = await embedding.embed_corpus(
-        tmp_export, persist_dir, embedder=embedder, summaries=False, force=True,
+        tmp_export, persist_dir, embedder=embedder, summaries=False, force=True, **identity,
     )
     assert stats3.files == 1
     assert stats3.skipped == 0
 
-    hits = await embedding.search(persist_dir, "widgets", embedder=embedder, k=1)
+    hits = await embedding.search(persist_dir, "widgets", embedder=embedder, k=1, **identity)
     assert len(hits) == 1
     assert hits[0]["slug"] == "conversations/alpha"
     assert hits[0]["kind"] == KIND_CONVERSATION
 
     # kind filter excludes it (no summary source was embedded).
-    no_hits = await embedding.search(persist_dir, "widgets", embedder=embedder, k=1, kind=KIND_SUMMARY)
+    no_hits = await embedding.search(
+        persist_dir, "widgets", embedder=embedder, k=1, kind=KIND_SUMMARY, **identity,
+    )
     assert no_hits == []
 
 
 async def test_embed_corpus_limit_and_empty_root_are_no_ops(tmp_export, tmp_path):
     persist_dir = tmp_path / "vdb"
     embedder = _FakeEmbedder()
-    stats = await embedding.embed_corpus(tmp_export, persist_dir, embedder=embedder)
+    stats = await embedding.embed_corpus(
+        tmp_export, persist_dir, embedder=embedder, backend="cloudflare", model="fake-model",
+    )
     assert stats == embedding.EmbedStats()
 
 
@@ -292,3 +301,35 @@ def test_backfill_kind_tags_pre_kind_rows_and_is_idempotent(tmp_path):
 
     # Idempotent: already-tagged rows are left alone on a second pass.
     assert embedding.backfill_kind(persist_dir) == 0
+
+
+# ---------------------------------------------------------------------------
+# open_collection -- identity stamp + mismatch guard
+# ---------------------------------------------------------------------------
+
+def _fresh_collection(tmp_path, backend="ollama", model="m1"):
+    from reindex import embedding
+    return embedding.open_collection(tmp_path / "db", backend=backend, model=model)
+
+
+def test_open_collection_stamps_identity(tmp_path):
+    pytest.importorskip("chromadb")
+    col = _fresh_collection(tmp_path)
+    assert col.metadata["embed_backend"] == "ollama"
+    assert col.metadata["embed_model"] == "m1"
+
+
+def test_open_collection_mismatch_raises(tmp_path):
+    pytest.importorskip("chromadb")
+    from reindex import embedding
+    _fresh_collection(tmp_path, model="m1")
+    with pytest.raises(embedding.CollectionMismatch, match="m1"):
+        embedding.open_collection(tmp_path / "db", backend="ollama", model="m2")
+
+
+def test_open_collection_unstamped_raises(tmp_path):
+    pytest.importorskip("chromadb")
+    from reindex import embedding
+    embedding.get_collection(tmp_path / "db")  # legacy, no stamp
+    with pytest.raises(embedding.CollectionMismatch, match="re-embed"):
+        embedding.open_collection(tmp_path / "db", backend="ollama", model="m1")
