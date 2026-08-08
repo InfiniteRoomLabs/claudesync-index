@@ -14,6 +14,7 @@ Strategy:
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,6 +27,20 @@ os.environ["NO_COLOR"] = "1"
 os.environ["COLUMNS"] = "120"
 os.environ.pop("FORCE_COLOR", None)
 os.environ.pop("GITHUB_ACTIONS", None)
+
+
+@pytest.fixture(autouse=True)
+def _stub_claude_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI runners have no `claude` binary, but provider preflight runs a real
+    shutil.which("claude") even when tests mock invoke(). Pretend it exists;
+    a test that needs it absent monkeypatches shutil.which itself (test-level
+    patches apply after this autouse stub and win)."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd, *a, **kw: "/usr/bin/claude" if cmd == "claude" else real_which(cmd, *a, **kw),
+    )
 
 # ---------------------------------------------------------------------------
 # Filesystem fixtures
