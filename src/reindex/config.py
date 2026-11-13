@@ -7,6 +7,9 @@ behavior exactly — with no `reindex.toml` present, nothing changes.
 Precedence for provider selection:
   CLI flag > $CSINDEX_PROVIDER > reindex.toml [reindex].provider > "claude-cli"
 
+Whether the `duet/` tree is indexed is resolved by `resolve_duet`:
+  CLI --duet/--no-duet > $CSINDEX_DUET > reindex.toml [reindex.sources].duet > true
+
 $CSINDEX_ROOT_MODEL overrides the root-tier model for any provider,
 independent of the [reindex.providers.*.models] TOML section.
 
@@ -177,6 +180,29 @@ def resolve_provider_name(
     if env:
         return coerce_provider_name(env)
     return coerce_provider_name(_read_toml(export_root).get("provider", DEFAULT_PROVIDER))
+
+
+_DUET_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def resolve_duet(export_root: Path, cli_value: bool | None = None) -> bool:
+    """Whether the `duet/` tree is indexed. Precedence: CLI flag >
+    $CSINDEX_DUET > `[reindex.sources].duet` in reindex.toml > True.
+
+    `cli_value` is None when neither --duet nor --no-duet was given, so env
+    and TOML still apply. Env: 0/false/no/off (any case) disable; any other
+    non-empty value enables; empty counts as unset, like $CSINDEX_PROVIDER."""
+    if cli_value is not None:
+        return cli_value
+    env = os.environ.get("CSINDEX_DUET", "").strip()
+    if env:
+        return env.lower() not in _DUET_OFF_VALUES
+    value = _read_toml(export_root).get("sources", {}).get("duet", True)
+    if not isinstance(value, bool):
+        raise SystemExit(
+            f"[reindex.sources].duet in reindex.toml must be true or false, got {value!r}"
+        )
+    return value
 
 
 def _tiers_from_toml(base: ModelTiers, section: dict[str, Any]) -> ModelTiers:

@@ -172,3 +172,75 @@ def test_resolve_embedding_unconfigured_raises(tmp_path, monkeypatch):
     from reindex import config, embedding
     with pytest.raises(embedding.EmbeddingConfigError, match="cloudflare, ollama, openai"):
         config.resolve_embedding(None, None, None, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# resolve_duet: CLI flag > $CSINDEX_DUET > [reindex.sources].duet > True
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _no_duet_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CSINDEX_DUET", raising=False)
+
+
+def _write_duet_toml(root: Path, value: str) -> None:
+    (root / "reindex.toml").write_text(f"[reindex.sources]\nduet = {value}\n", encoding="utf-8")
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_defaults_on_without_toml(tmp_path: Path):
+    assert config.resolve_duet(tmp_path) is True
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_defaults_on_with_unrelated_toml(tmp_path: Path):
+    (tmp_path / "reindex.toml").write_text('[reindex]\nprovider = "ollama"\n', encoding="utf-8")
+    assert config.resolve_duet(tmp_path) is True
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+@pytest.mark.parametrize(("toml_value", "expected"), [("false", False), ("true", True)])
+def test_duet_toml_sets_value(tmp_path: Path, toml_value: str, expected: bool):
+    _write_duet_toml(tmp_path, toml_value)
+    assert config.resolve_duet(tmp_path) is expected
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_toml_non_boolean_exits(tmp_path: Path):
+    _write_duet_toml(tmp_path, '"off"')
+    with pytest.raises(SystemExit, match=r"\[reindex\.sources\]"):
+        config.resolve_duet(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "NO", "off", " Off "])
+def test_duet_env_disables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("CSINDEX_DUET", value)
+    assert config.resolve_duet(tmp_path) is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "anything"])
+def test_duet_env_anything_else_enables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str):
+    monkeypatch.setenv("CSINDEX_DUET", value)
+    _write_duet_toml(tmp_path, "false")  # env beats toml
+    assert config.resolve_duet(tmp_path) is True
+
+
+def test_duet_empty_env_is_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CSINDEX_DUET", "")
+    _write_duet_toml(tmp_path, "false")
+    assert config.resolve_duet(tmp_path) is False
+
+
+def test_duet_env_beats_toml_when_disabling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CSINDEX_DUET", "off")
+    _write_duet_toml(tmp_path, "true")
+    assert config.resolve_duet(tmp_path) is False
+
+
+def test_duet_cli_beats_env_and_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CSINDEX_DUET", "off")
+    _write_duet_toml(tmp_path, "false")
+    assert config.resolve_duet(tmp_path, True) is True
+    monkeypatch.setenv("CSINDEX_DUET", "on")
+    _write_duet_toml(tmp_path, "true")
+    assert config.resolve_duet(tmp_path, False) is False
