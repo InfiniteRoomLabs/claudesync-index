@@ -57,6 +57,41 @@ Each level's `INDEX.md` stamps a content hash of its inputs. On the next run, an
 
 If a provider call fails in a retryable way (malformed structured output, a parse failure), the runner retries once against that provider's configured `escalation` model — a stronger model for the cases the normal tier can't handle. Escalation is per-provider and configurable in `reindex.toml`. The root step never escalates — it already runs the strongest configured model, so retrying "up" would be a downgrade.
 
+## The Duet tree
+
+Newer claudesync exports can carry a `duet/` directory beside `conversations/` and `projects/`, holding Claude Duet chat and tasks:
+
+```
+<export root>/duet/
+  duet.json, tasks.json
+  knowledge/TASKS.md
+  conversations/<YYYY-MM-DD>-<channel-slug>/conversation.md
+```
+
+`csindex` indexes it by default, reusing the same three steps:
+
+- Each channel-day under `duet/conversations/` is an ordinary leaf and gets its own `INDEX.md`.
+- `duet/` is treated as one more project (slug `duet`), so `duet/INDEX.md` aggregates the day summaries and lists `knowledge/TASKS.md`. It is skipped while there are no day directories.
+- The root `INDEX.md` includes `duet/INDEX.md` as a `=== duet ===` section.
+- `csindex embed` embeds the Duet day conversations and summaries under the usual `--no-conversations` / `--no-summaries` switches.
+- `csindex repair-hashes` stamps the Duet hashes too.
+
+A root that contains only `duet/` is a valid export tree.
+
+Exports with no `duet/` directory behave exactly as before, and the root cache key is unchanged, so nothing is re-summarized.
+
+To turn it off, use any one of these (highest precedence first). With it off, nothing under `duet/` is read, written, hashed or embedded:
+
+| Mechanism | Setting |
+|---|---|
+| CLI, on `full`, `embed` and `quick` | `--no-duet` (`--duet` forces it on) |
+| Environment | `CSINDEX_DUET=off` (`0`, `false`, `no` and `off` disable; any other value enables) |
+| `reindex.toml` | `[reindex.sources]` with `duet = false` |
+
+`repair-hashes` has no flag; it follows the environment and `reindex.toml`. `quick` accepts the flag for a uniform command line but never reads `duet/` either way.
+
+Known limitation: a claude.ai project whose directory is literally `projects/duet` shares the slug `duet` with this tree in cost logs and batch custom ids.
+
 ## Commands
 
 | Command | Purpose |
@@ -102,7 +137,8 @@ Environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `CSINDEX_ROOT` | Export tree path. Precedence: `--root` > `$CSINDEX_ROOT` > current directory. An invalid tree (no `conversations/` or `projects/` subdirectory) exits `65`. |
+| `CSINDEX_ROOT` | Export tree path. Precedence: `--root` > `$CSINDEX_ROOT` > current directory. An invalid tree (none of `conversations/`, `projects/` or `duet/` present) exits `65`. |
+| `CSINDEX_DUET` | Set to `0`, `false`, `no` or `off` to skip the `duet/` tree. Overrides `reindex.toml`; `--duet`/`--no-duet` overrides this. See [The Duet tree](#the-duet-tree). |
 | `CSINDEX_PROVIDER` | Default provider, overriding `reindex.toml`'s `[reindex].provider`. |
 | `CSINDEX_ROOT_MODEL` | Overrides the root-tier model for any provider, independent of `reindex.toml`'s per-provider model tiers. |
 | `CSINDEX_COST_LOG` | Path to the JSONL cost log. Defaults to `<export>/.reindex-costs.jsonl`. |

@@ -49,7 +49,8 @@ by construction.
 6. **CLI wiring** (`cli.py`, `repair.py`, tests).
    `--duet/--no-duet` on `quick`, `full`, `embed`, default "not given" (`None`).
    `full` and `embed` pass the resolved value down. `repair-hashes` resolves it from
-   env and TOML so its root hash matches what `full` stamps.
+   env and TOML (no flag) so its root hash matches what `full` stamps, and when
+   enabled it also stamps the Duet day leaves and the `duet/` project hash.
    `quick` accepts and resolves the flag for a uniform surface. Its prompt never reads
    `duet/` and prompts are out of scope, so the flag has no further effect there.
 

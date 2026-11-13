@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Indexing of the claudesync `duet/` tree (Claude Duet chat and tasks), on by default. Each channel-day under `duet/conversations/` is an ordinary leaf; `duet/` is treated as one more project (slug `duet`), skipped while it has no day directories; the root `INDEX.md` gains a `=== duet ===` section and a `duet:<children_hash>` cache-key entry. `csindex embed` embeds the Duet leaves and summaries under the existing `--no-conversations` / `--no-summaries` switches, and `csindex repair-hashes` stamps the Duet hashes. A root containing only `duet/` is now a valid export tree, and the invalid-tree error names `conversations/`, `projects/` and `duet/`. Exports without a `duet/` directory produce a byte-identical root payload and `inputs_hash`, so existing indexes are not invalidated.
+- `--duet/--no-duet` on `quick`, `full` and `embed`, `$CSINDEX_DUET` (`0`, `false`, `no`, `off` disable) and `[reindex.sources].duet` in `reindex.toml` to control it. Precedence: CLI flag > `$CSINDEX_DUET` > `reindex.toml` > on. With it off, nothing under `duet/` is read, written, hashed or embedded, and the root payload and `inputs_hash` are again byte-identical to the pre-Duet ones. `quick` accepts the flag but never reads `duet/` either way, and `repair-hashes` follows the environment and `reindex.toml` only.
+
 ## [0.1.0] - 2026-08-08
 
 ### Added
