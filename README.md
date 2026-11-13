@@ -45,7 +45,7 @@ Open `~/claude-export/INDEX.md` when it's done.
 
 `claude-cli` is the default provider. Select another with `--provider`, `--api` (alias for `--provider anthropic`), `--subscription` (alias for `--provider claude-cli`), or `$CSINDEX_PROVIDER`.
 
-Transcripts are untrusted text, so the summarizer never gets a tool that can act on anything. `claude-cli` runs `claude -p --restricted --strict-mcp-config --tools ""` from an empty temporary directory, so no MCP server loads and the session runs in the default permission mode rather than yours. For a transcript over 200KB it allows only `--tools Read`, on a private copy of that one `conversation.md`. This needs a Claude Code release that accepts those flags; an older one fails with a message asking you to upgrade.
+Transcripts are untrusted text, so the summarizer never gets a tool that can act on anything. `claude-cli` runs `claude -p --restricted --strict-mcp-config --no-session-persistence --tools ""` from an empty temporary directory, so no MCP server loads, the session runs in the default permission mode rather than yours, and no copy of the transcript is saved to Claude Code's session history. For a transcript over 200KB it allows only `--tools Read`, on a private copy of that one `conversation.md`. This needs a Claude Code release that accepts those flags; an older one fails with a message asking you to upgrade.
 
 ## How it works
 

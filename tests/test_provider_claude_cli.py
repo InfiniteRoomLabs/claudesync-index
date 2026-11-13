@@ -275,8 +275,8 @@ async def test_inline_mode_runs_restricted_with_no_tools(valid_leaf_dict, tmp_ex
     assert rec.argv == [
         "claude", "-p",
         "--model", "claude-haiku-4-5",
-        "--restricted", "--strict-mcp-config",
-        "--tools", "",
+        "--restricted", "--strict-mcp-config", "--no-session-persistence",
+        "--tools","",
         "--output-format", "json",
         "--json-schema", _leaf_schema_str(),
     ]
@@ -303,8 +303,8 @@ async def test_file_mode_exposes_only_a_copy_of_conversation_md(valid_leaf_dict,
     assert rec.argv == [
         "claude", "-p",
         "--model", "claude-haiku-4-5",
-        "--restricted", "--strict-mcp-config",
-        "--tools", "Read",
+        "--restricted", "--strict-mcp-config", "--no-session-persistence",
+        "--tools","Read",
         "--add-dir", str(sandbox),
         "--output-format", "json",
         "--json-schema", _leaf_schema_str(),

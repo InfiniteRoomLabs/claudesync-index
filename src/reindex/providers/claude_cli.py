@@ -174,12 +174,17 @@ class ClaudeCliProvider(Provider):
         #     (messages.json, README.md) and the export root stay unreachable.
         #   * cwd=<sandbox>: a fresh temporary directory in both modes, so the
         #     session's working directory never holds export content.
+        #   * --no-session-persistence: the session is not saved. Every call
+        #     runs from a new directory, so a saved session would leave one
+        #     ~/.claude/projects entry (holding the transcript) per summary.
+        #     Verified 2026-11-13: the entry count is unchanged after a call,
+        #     and in file mode a Read outside the sandbox is denied.
         # Never fall back to a weaker invocation: an older claude that rejects
         # these flags gets an upgrade message (below), not a retry without them.
         cli_args = [
             "claude", "-p",
             "--model", req.model,
-            "--restricted", "--strict-mcp-config",
+            "--restricted", "--strict-mcp-config", "--no-session-persistence",
         ]
         if req.allow_filesystem and req.work_dir is not None:
             original = req.work_dir / "conversation.md"
