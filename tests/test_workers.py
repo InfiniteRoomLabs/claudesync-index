@@ -211,6 +211,91 @@ def test_prepare_root_force_bypasses_cache(tmp_export):
     assert prepare_root(tmp_export, force=True) is not None
 
 
+def _write_fm(path: Path, **fm: str) -> None:
+    lines = "\n".join(f"{k}: {v}" for k, v in fm.items())
+    path.write_text(f"---\n{lines}\n---\n\nbody\n", encoding="utf-8")
+
+
+def _root_tree_with_duet(root: Path) -> None:
+    (root / "projects" / "p").mkdir(parents=True)
+    _write_fm(root / "projects" / "p" / "INDEX.md", slug="p", children_hash="h1")
+    (root / "conversations" / "foo").mkdir(parents=True)
+    _write_fm(root / "conversations" / "foo" / "INDEX.md", slug="foo", content_hash="c1")
+    (root / "duet").mkdir()
+    _write_fm(root / "duet" / "INDEX.md", slug="duet", children_hash="d1")
+
+
+def test_prepare_root_includes_duet_when_enabled(tmp_export):
+    _root_tree_with_duet(tmp_export)
+    item = prepare_root(tmp_export, duet=True)
+    assert item is not None
+    assert "=== duet ===\n---\nslug: duet\nchildren_hash: d1\n---" in item.user_content
+    # Appended after the existing sections, which keep their order.
+    text = item.user_content
+    assert text.index("=== project/p ===") < text.index("=== standalone/foo ===") < text.index("=== duet ===")
+
+
+def test_prepare_root_payload_and_hash_unchanged_when_duet_disabled_or_absent(tmp_export):
+    # Reference: the same tree without any duet/ directory, built before any
+    # Duet-aware call, i.e. what the pre-Duet code produced.
+    (tmp_export / "projects" / "p").mkdir(parents=True)
+    _write_fm(tmp_export / "projects" / "p" / "INDEX.md", slug="p", children_hash="h1")
+    (tmp_export / "conversations" / "foo").mkdir(parents=True)
+    _write_fm(tmp_export / "conversations" / "foo" / "INDEX.md", slug="foo", content_hash="c1")
+    ref = prepare_root(tmp_export)
+    assert ref is not None
+    assert "duet" not in ref.user_content
+    expected = (ref.inputs_hash, ref.user_content)
+
+    # Duet enabled but the directory is absent.
+    absent = prepare_root(tmp_export, duet=True)
+    assert (absent.inputs_hash, absent.user_content) == expected
+
+    # Duet present but disabled (explicitly, and by default).
+    (tmp_export / "duet").mkdir()
+    _write_fm(tmp_export / "duet" / "INDEX.md", slug="duet", children_hash="d1")
+    for item in (prepare_root(tmp_export, duet=False), prepare_root(tmp_export)):
+        assert (item.inputs_hash, item.user_content) == expected
+
+
+def test_prepare_root_duet_cache_hit_and_miss(tmp_export):
+    _root_tree_with_duet(tmp_export)
+    item = prepare_root(tmp_export, duet=True)
+    assert item is not None
+    (tmp_export / "INDEX.md").write_text(
+        f"---\ntype: root\ninputs_hash: {item.inputs_hash}\n---\nbody\n", encoding="utf-8",
+    )
+    assert prepare_root(tmp_export, duet=True) is None
+    _write_fm(tmp_export / "duet" / "INDEX.md", slug="duet", children_hash="d2")
+    assert prepare_root(tmp_export, duet=True) is not None
+    # Disabled, the root ignores duet entirely, so the old stamp is a different key.
+    assert prepare_root(tmp_export, duet=False) is not None
+
+
+def test_prepare_root_never_reads_duet_when_disabled(tmp_export, monkeypatch):
+    from reindex import hashing
+    _root_tree_with_duet(tmp_export)
+    touched: list[Path] = []
+    real_fm, real_head = hashing.read_frontmatter_field, hashing.frontmatter_head
+    monkeypatch.setattr(hashing, "read_frontmatter_field", lambda p, f: (touched.append(p), real_fm(p, f))[1])
+    monkeypatch.setattr(hashing, "frontmatter_head", lambda p: (touched.append(p), real_head(p))[1])
+    prepare_root(tmp_export, duet=False)
+    assert touched
+    assert not [p for p in touched if "duet" in p.parts]
+
+
+def test_prepare_project_for_duet_dir(tmp_export, make_duet):
+    duet = make_duet("2026-11-01-general")
+    day = duet / "conversations" / "2026-11-01-general"
+    _write_fm(day / "INDEX.md", slug="2026-11-01-general", content_hash="abc")
+    item = prepare_project(duet)
+    assert item is not None
+    assert item.slug == "duet"
+    assert item.out_file == duet / "INDEX.md"
+    assert "=== 2026-11-01-general ===" in item.user_content
+    assert "=== knowledge/TASKS.md ===" in item.user_content
+
+
 # ---------------------------------------------------------------------------
 # finalize_X — render + stamp + cost log
 # ---------------------------------------------------------------------------

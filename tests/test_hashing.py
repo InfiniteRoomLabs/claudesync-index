@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from reindex import hashing, models
@@ -113,6 +114,89 @@ def test_inputs_hash_changes_when_standalone_added(tmp_path: Path):
     )
     h_one = hashing.root_inputs_hash(tmp_path)
     assert h_empty != h_one
+
+
+# ---------------------------------------------------------------------------
+# root_inputs_hash and the duet/ tree
+# ---------------------------------------------------------------------------
+
+def _legacy_root_hash(pairs: list[str]) -> str:
+    """The root cache key exactly as computed before Duet existed, restated
+    independently so the invariant below does not depend on the code under test."""
+    pairs = [*pairs, f"schema:{hashing.schema_hash(models.RootAggregate)}"]
+    pairs.sort()
+    return hashlib.sha256(("\n".join(pairs) + "\n").encode()).hexdigest()
+
+
+def _legacy_tree(root: Path) -> list[str]:
+    (root / "projects" / "p").mkdir(parents=True)
+    _write_index(root / "projects" / "p" / "INDEX.md", {"slug": "p", "children_hash": "h1"})
+    (root / "conversations" / "foo").mkdir(parents=True)
+    _write_index(root / "conversations" / "foo" / "INDEX.md", {"slug": "foo", "content_hash": "c1"})
+    return ["project:p:h1", "standalone:foo:c1"]
+
+
+def _duet_index(root: Path, children_hash: str = "d1") -> Path:
+    (root / "duet").mkdir(exist_ok=True)
+    return _write_index(root / "duet" / "INDEX.md", {"slug": "duet", "children_hash": children_hash})
+
+
+def test_root_hash_matches_legacy_when_duet_absent(tmp_path: Path):
+    legacy = _legacy_tree(tmp_path)
+    expected = _legacy_root_hash(legacy)
+    assert hashing.root_inputs_hash(tmp_path) == expected
+    assert hashing.root_inputs_hash(tmp_path, duet=True) == expected
+
+
+def test_root_hash_matches_legacy_when_duet_dir_has_no_index(tmp_path: Path):
+    legacy = _legacy_tree(tmp_path)
+    (tmp_path / "duet").mkdir()
+    assert hashing.root_inputs_hash(tmp_path, duet=True) == _legacy_root_hash(legacy)
+
+
+def test_root_hash_matches_legacy_when_duet_disabled(tmp_path: Path):
+    legacy = _legacy_tree(tmp_path)
+    _duet_index(tmp_path)
+    expected = _legacy_root_hash(legacy)
+    assert hashing.root_inputs_hash(tmp_path) == expected  # default is off
+    assert hashing.root_inputs_hash(tmp_path, duet=False) == expected
+
+
+def test_root_hash_includes_duet_when_enabled_and_present(tmp_path: Path):
+    legacy = _legacy_tree(tmp_path)
+    _duet_index(tmp_path, "d1")
+    assert hashing.root_inputs_hash(tmp_path, duet=True) == _legacy_root_hash([*legacy, "duet:d1"])
+
+
+def test_root_hash_changes_when_duet_children_hash_changes(tmp_path: Path):
+    _legacy_tree(tmp_path)
+    _duet_index(tmp_path, "d1")
+    h1 = hashing.root_inputs_hash(tmp_path, duet=True)
+    _duet_index(tmp_path, "d2")
+    assert hashing.root_inputs_hash(tmp_path, duet=True) != h1
+
+
+def test_root_hash_ignores_duet_index_without_children_hash(tmp_path: Path):
+    legacy = _legacy_tree(tmp_path)
+    (tmp_path / "duet").mkdir()
+    _write_index(tmp_path / "duet" / "INDEX.md", {"slug": "duet"})
+    assert hashing.root_inputs_hash(tmp_path, duet=True) == _legacy_root_hash(legacy)
+
+
+def test_root_hash_never_reads_duet_when_disabled(tmp_path: Path, monkeypatch):
+    _legacy_tree(tmp_path)
+    _duet_index(tmp_path)
+    seen: list[Path] = []
+    real = hashing.read_frontmatter_field
+
+    def spy(md_file: Path, field: str):
+        seen.append(md_file)
+        return real(md_file, field)
+
+    monkeypatch.setattr(hashing, "read_frontmatter_field", spy)
+    hashing.root_inputs_hash(tmp_path, duet=False)
+    assert seen
+    assert not [p for p in seen if "duet" in p.parts]
 
 
 # ---------------------------------------------------------------------------

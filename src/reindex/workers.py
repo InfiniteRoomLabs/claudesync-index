@@ -330,11 +330,13 @@ def finalize_project(
 # Root
 # ---------------------------------------------------------------------------
 
-def prepare_root(export_dir: Path, *, provider: Provider | None = None, force: bool = False) -> RootItem | None:
+def prepare_root(
+    export_dir: Path, *, provider: Provider | None = None, force: bool = False, duet: bool = False,
+) -> RootItem | None:
     provider = provider or _default_provider()
     root_log = log.get("worker")
     out_file = export_dir / "INDEX.md"
-    inputs_hash = hashing.root_inputs_hash(export_dir)
+    inputs_hash = hashing.root_inputs_hash(export_dir, duet=duet)
     model_name = provider.model_for("root")
     generated_at = _now_iso_z()
     root_log.debug("hash_computed", inputs_hash=inputs_hash)
@@ -354,6 +356,8 @@ def prepare_root(export_dir: Path, *, provider: Provider | None = None, force: b
     if convo_dir.is_dir():
         for idx in sorted(convo_dir.glob("*/INDEX.md")):
             payload_parts.append(f"=== standalone/{idx.parent.name} ===\n{hashing.frontmatter_head(idx)}")
+    if duet and (duet_idx := export_dir / "duet" / "INDEX.md").is_file():
+        payload_parts.append(f"=== duet ===\n{hashing.frontmatter_head(duet_idx)}")
 
     children_payload = "\n\n".join(payload_parts)
     system_prompt = _read_template("root-aggregate", EXPORT_DIR=str(export_dir))
