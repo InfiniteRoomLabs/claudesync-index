@@ -96,23 +96,34 @@ def _standalone_dirs(root: Path) -> list[Path]:
     return sorted(p for p in d.iterdir() if p.is_dir())
 
 
-def _nested_dirs(root: Path) -> list[Path]:
-    d = root / "projects"
-    if not d.is_dir():
+def _duet_leaf_dirs(root: Path) -> list[Path]:
+    """Duet channel-day directories under `duet/conversations/`."""
+    c = root / "duet" / "conversations"
+    if not c.is_dir():
         return []
+    return sorted(p for p in c.iterdir() if p.is_dir())
+
+
+def _nested_dirs(root: Path, *, duet: bool = False) -> list[Path]:
     out: list[Path] = []
-    for proj in sorted(p for p in d.iterdir() if p.is_dir()):
-        c = proj / "conversations"
-        if c.is_dir():
-            out.extend(sorted(p for p in c.iterdir() if p.is_dir()))
+    d = root / "projects"
+    if d.is_dir():
+        for proj in sorted(p for p in d.iterdir() if p.is_dir()):
+            c = proj / "conversations"
+            if c.is_dir():
+                out.extend(sorted(p for p in c.iterdir() if p.is_dir()))
+    if duet:
+        out.extend(_duet_leaf_dirs(root))
     return out
 
 
-def _project_dirs(root: Path) -> list[Path]:
+def _project_dirs(root: Path, *, duet: bool = False) -> list[Path]:
     d = root / "projects"
-    if not d.is_dir():
-        return []
-    return sorted(p for p in d.iterdir() if p.is_dir())
+    out = sorted(p for p in d.iterdir() if p.is_dir()) if d.is_dir() else []
+    # `duet/` is one more project (slug `duet`), but only once it has day leaves.
+    if duet and _duet_leaf_dirs(root):
+        out.append(root / "duet")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -267,9 +278,9 @@ def _resolve_provider_flags(
     return config.resolve_provider_name(paths.EXPORT_ROOT)
 
 
-def _gather_leaves(scope: str, limit: int) -> list[Path]:
+def _gather_leaves(scope: str, limit: int, *, duet: bool = False) -> list[Path]:
     standalone = _standalone_dirs(paths.EXPORT_ROOT) if scope in ("standalone", "both") else []
-    nested = _nested_dirs(paths.EXPORT_ROOT) if scope in ("nested", "both") else []
+    nested = _nested_dirs(paths.EXPORT_ROOT, duet=duet) if scope in ("nested", "both") else []
     log.get("orchestrator").debug(
         "dir_scan", standalone=len(standalone), project_nested=len(nested), scope=scope,
     )

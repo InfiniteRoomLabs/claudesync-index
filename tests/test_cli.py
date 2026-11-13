@@ -169,6 +169,76 @@ def test_gather_leaves_respects_limit(tmp_export, make_conv):
     assert len(dirs) == 2
 
 
+def test_nested_dirs_includes_duet_days_when_enabled(tmp_export, make_conv, make_project, make_duet):
+    make_project("p1")
+    make_conv("c1", "x", project="p1")
+    make_duet("2026-11-02-general", "2026-11-01-general")
+    dirs = cli._nested_dirs(tmp_export, duet=True)
+    assert [d.name for d in dirs] == ["c1", "2026-11-01-general", "2026-11-02-general"]
+    assert dirs[1].parent == tmp_export / "duet" / "conversations"
+
+
+def test_nested_dirs_ignores_duet_unless_enabled(tmp_export, make_duet):
+    make_duet("2026-11-01-general")
+    assert cli._nested_dirs(tmp_export) == []
+    assert cli._nested_dirs(tmp_export, duet=False) == []
+
+
+def test_nested_dirs_duet_without_conversations_dir(tmp_export):
+    (tmp_export / "duet").mkdir()
+    assert cli._nested_dirs(tmp_export, duet=True) == []
+
+
+def test_nested_dirs_skips_files_in_duet_conversations(tmp_export, make_duet):
+    duet = make_duet("2026-11-01-general")
+    (duet / "conversations" / "stray.txt").write_text("x", encoding="utf-8")
+    assert [d.name for d in cli._nested_dirs(tmp_export, duet=True)] == ["2026-11-01-general"]
+
+
+def test_project_dirs_appends_duet_when_it_has_leaves(tmp_export, make_project, make_duet):
+    make_project("zeta")
+    make_project("alpha")
+    duet = make_duet("2026-11-01-general")
+    assert cli._project_dirs(tmp_export, duet=True) == [
+        tmp_export / "projects" / "alpha", tmp_export / "projects" / "zeta", duet,
+    ]
+
+
+def test_project_dirs_skips_duet_without_leaves(tmp_export, make_duet):
+    make_duet()  # conversations/ exists but is empty
+    assert cli._project_dirs(tmp_export, duet=True) == []
+    (tmp_export / "duet" / "conversations").rmdir()
+    assert cli._project_dirs(tmp_export, duet=True) == []
+
+
+def test_project_dirs_ignores_duet_unless_enabled(tmp_export, make_duet):
+    make_duet("2026-11-01-general")
+    assert cli._project_dirs(tmp_export) == []
+    assert cli._project_dirs(tmp_export, duet=False) == []
+
+
+def test_gather_leaves_includes_duet_in_nested_and_both_not_standalone(tmp_export, make_conv, make_duet):
+    make_conv("solo", "x")
+    make_duet("2026-11-01-general")
+    both = cli._gather_leaves("both", limit=0, duet=True)
+    nested = cli._gather_leaves("nested", limit=0, duet=True)
+    standalone = cli._gather_leaves("standalone", limit=0, duet=True)
+    assert [d.name for d in both] == ["solo", "2026-11-01-general"]
+    assert [d.name for d in nested] == ["2026-11-01-general"]
+    assert [d.name for d in standalone] == ["solo"]
+
+
+def test_gather_leaves_limit_applies_to_duet_days(tmp_export, make_duet):
+    make_duet("2026-11-01-a", "2026-11-02-a", "2026-11-03-a")
+    assert len(cli._gather_leaves("both", limit=2, duet=True)) == 2
+
+
+def test_gather_leaves_excludes_duet_when_disabled(tmp_export, make_conv, make_duet):
+    make_conv("solo", "x")
+    make_duet("2026-11-01-general")
+    assert [d.name for d in cli._gather_leaves("both", limit=0, duet=False)] == ["solo"]
+
+
 # ---------------------------------------------------------------------------
 # API path dispatch (batch) — verify it routes through batch.run, not subscription
 # ---------------------------------------------------------------------------

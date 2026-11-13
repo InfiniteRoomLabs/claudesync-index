@@ -128,6 +128,28 @@ def make_project(tmp_export: Path):
     return _make
 
 
+@pytest.fixture
+def make_duet(tmp_export: Path):
+    """Factory for the `duet/` tree: one conversation.md per channel-day slug,
+    plus knowledge/TASKS.md and the duet.json / tasks.json manifests."""
+    def _make(*days: str, tasks_md: bool = True) -> Path:
+        duet = tmp_export / "duet"
+        (duet / "conversations").mkdir(parents=True, exist_ok=True)
+        (duet / "duet.json").write_text("{}", encoding="utf-8")
+        (duet / "tasks.json").write_text("[]", encoding="utf-8")
+        if tasks_md:
+            (duet / "knowledge").mkdir(exist_ok=True)
+            (duet / "knowledge" / "TASKS.md").write_text("# Tasks\n", encoding="utf-8")
+        for day in days:
+            d = duet / "conversations" / day
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "conversation.md").write_text(
+                f"## Human\n_2026-11-13T09:00:00Z_\n\nduet chat {day}\n", encoding="utf-8",
+            )
+        return duet
+    return _make
+
+
 # ---------------------------------------------------------------------------
 # Pydantic payload fixtures
 # ---------------------------------------------------------------------------
