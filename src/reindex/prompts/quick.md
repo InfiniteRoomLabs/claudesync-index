@@ -32,6 +32,6 @@ Work through these steps explicitly, narrating what you're doing at each step:
 5. After writing, re-read both files and confirm the values match what step 1 produced. If anything is off, fix it.
 
 Constraints:
-- Do not modify anything inside conversations/ or projects/.
+- Do not modify anything inside conversations/, projects/ or duet/.
 - Be terse. No marketing copy. No emojis.
 - Sort the projects list alphabetically.

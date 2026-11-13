@@ -12,6 +12,7 @@ Provider selection (--provider NAME, default claude-cli):
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ from reindex import (
     workers,
 )
 from reindex import runner as runner_mod
+from reindex.cli_options import DuetOption
 from reindex.lockfile import single_instance
 from reindex.providers import BatchCapable, Provider, get_provider, provider_class
 from reindex.providers.base import ProviderFailure
@@ -122,7 +124,16 @@ def _project_dirs(root: Path, *, duet: bool = False) -> list[Path]:
     out = sorted(p for p in d.iterdir() if p.is_dir()) if d.is_dir() else []
     # `duet/` is one more project (slug `duet`), but only once it has day leaves.
     if duet and _duet_leaf_dirs(root):
-        out.append(root / "duet")
+        if (d / "duet").is_dir():
+            # A claude.ai project directory named `duet` would give two project
+            # items the custom id `duet` in one batch; results are matched by
+            # custom id, so one would be lost. The claude.ai project keeps it.
+            log.get("orchestrator").warning(
+                "duet_project_skipped", reason="projects_duet_exists",
+                hint="duet/INDEX.md is not regenerated while projects/duet exists; Duet days are still indexed",
+            )
+        else:
+            out.append(root / "duet")
     return out
 
 
@@ -278,15 +289,6 @@ def _resolve_provider_flags(
     return config.resolve_provider_name(paths.EXPORT_ROOT)
 
 
-# One definition for the three commands that take --duet/--no-duet. The
-# default is None ("not given") so $CSINDEX_DUET and reindex.toml still apply.
-DuetOption = Annotated[bool | None, typer.Option(
-    "--duet/--no-duet",
-    help="Index the duet/ tree. Default: $CSINDEX_DUET, then reindex.toml "
-    "[reindex.sources].duet, then on.",
-)]
-
-
 def _gather_leaves(scope: str, limit: int, *, duet: bool = False) -> list[Path]:
     standalone = _standalone_dirs(paths.EXPORT_ROOT) if scope in ("standalone", "both") else []
     nested = _nested_dirs(paths.EXPORT_ROOT, duet=duet) if scope in ("nested", "both") else []
@@ -318,17 +320,14 @@ def quick(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
-    duet: DuetOption = None,
 ) -> None:
     """Counts + top README/METADATA only (cheap, subscription-only).
 
-    --duet/--no-duet is accepted for a uniform surface but changes nothing
-    here: the packaged prompt only counts conversations/ and projects/ and
-    never reads duet/."""
+    Never reads duet/, so the Duet switch does not apply: the packaged prompt
+    only counts conversations/ and projects/, and forbids touching duet/."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
-    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     if json_logs:
         log_format = "json"
@@ -341,7 +340,6 @@ def quick(
     _preflight_claude_binary()
 
     olog = log.get("orchestrator")
-    olog.debug("duet_setting", enabled=duet_on, used=False)
     prompt = prompt_loader.load_prompt("quick").replace("{{EXPORT_DIR}}", str(paths.EXPORT_ROOT))
     try:
         with single_instance(paths.EXPORT_ROOT):
@@ -420,7 +418,6 @@ def full(
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
-    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     if json_logs:
         log_format = "json"
@@ -447,10 +444,22 @@ def full(
     _common_setup(log_level, log_format, no_color,
                   log_file=log_file, no_log_file=no_log_file)
     olog = log.get("orchestrator")
+    # After _common_setup, so $CSINDEX_DUET from <export>/.env applies.
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
     olog.debug("duet_setting", enabled=duet_on)
 
     # Construct AFTER dotenv so api-key preflights see .env values.
     provider = get_provider(provider_name, config.load(paths.EXPORT_ROOT, provider_name=provider_name))
+    if duet_on and not provider.tool_safe:
+        # Duet chat quotes email and calendar text written by other people.
+        # It only ever reaches a model that has no tools; fail closed.
+        olog.error(
+            "duet_skipped_provider_not_tool_safe",
+            provider=provider.name,
+            hint="this provider can give the model tools; Duet is skipped for this run. "
+            "For opencode, configure the tool-free `quick` agent.",
+        )
+        duet_on = False
 
     only_set = sum([only_leaves, only_projects, only_root])
     if only_set > 1:
@@ -480,7 +489,7 @@ def full(
                     await provider.resume_pending(
                         state=state,
                         schema_for_step=lambda step: models.STEP_MODEL[step],
-                        finalize_persisted=workers.finalize_persisted,
+                        finalize_persisted=functools.partial(workers.finalize_persisted, duet=duet_on),
                         max_in_flight=max_in_flight,
                     )
 
@@ -594,13 +603,13 @@ def embed(
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
-    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     from reindex import embedding
 
     level = "warn" if quiet else ("debug" if verbose else None)
     _common_setup(level, "json" if json_logs else None, no_color)
     olog = log.get("orchestrator")
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)  # after .env is loaded
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
     if no_conversations and no_summaries:
         olog.error("embed_nothing_to_do", reason="--no-conversations and --no-summaries")
@@ -688,6 +697,9 @@ def search(
     from reindex import embedding
 
     _common_setup("debug" if verbose else "warn", None, no_color, no_log_file=True)
+    # Chunks embedded while Duet was on stay in the store; leave them out of
+    # results while it is off ($CSINDEX_DUET, then reindex.toml).
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT)
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
     try:
         backend_r, model_r, base_url_r = config.resolve_embedding(backend, model, base_url, paths.EXPORT_ROOT)
@@ -700,7 +712,7 @@ def search(
         try:
             return await embedding.search(
                 persist_dir, query, embedder=embedder,
-                backend=backend_r, model=embedder.model, k=k, kind=kind,
+                backend=backend_r, model=embedder.model, k=k, kind=kind, duet=duet_on,
             )
         finally:
             await embedder.aclose()

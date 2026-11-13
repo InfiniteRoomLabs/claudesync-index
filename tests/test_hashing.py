@@ -183,20 +183,12 @@ def test_root_hash_ignores_duet_index_without_children_hash(tmp_path: Path):
     assert hashing.root_inputs_hash(tmp_path, duet=True) == _legacy_root_hash(legacy)
 
 
-def test_root_hash_never_reads_duet_when_disabled(tmp_path: Path, monkeypatch):
-    _legacy_tree(tmp_path)
-    _duet_index(tmp_path)
-    seen: list[Path] = []
-    real = hashing.read_frontmatter_field
-
-    def spy(md_file: Path, field: str):
-        seen.append(md_file)
-        return real(md_file, field)
-
-    monkeypatch.setattr(hashing, "read_frontmatter_field", spy)
-    hashing.root_inputs_hash(tmp_path, duet=False)
-    assert seen
-    assert not [p for p in seen if "duet" in p.parts]
+def test_root_hash_never_reads_duet_when_disabled(tmp_export: Path, duet_touches):
+    _legacy_tree(tmp_export)
+    _duet_index(tmp_export)
+    duet_touches.clear()
+    hashing.root_inputs_hash(tmp_export, duet=False)
+    assert duet_touches == []
 
 
 # ---------------------------------------------------------------------------

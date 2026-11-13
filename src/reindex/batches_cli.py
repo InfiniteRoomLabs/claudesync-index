@@ -18,6 +18,7 @@ Read-only (list, show) skip the lockfile. State-mutating commands acquire it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import sys
@@ -538,6 +539,9 @@ def resume(
     # Resume is a long-running pipeline op; default log level is info (verbose).
     _setup(log_level or "info", log_format, no_color, need_api_key=True,
            log_file=log_file, no_log_file=no_log_file)
+    # Pending items marked Duet are finalized only while Duet is on ($CSINDEX_DUET,
+    # including <export>/.env, then reindex.toml), the same setting `full` uses.
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT)
     state = BatchState(paths.EXPORT_ROOT)
     if state.is_empty():
         if _is_json_mode(json_out):
@@ -563,7 +567,7 @@ def resume(
                 await provider.resume_pending(
                     state=state,
                     schema_for_step=lambda s: models.STEP_MODEL[s],
-                    finalize_persisted=workers.finalize_persisted,
+                    finalize_persisted=functools.partial(workers.finalize_persisted, duet=duet_on),
                     max_in_flight=max_in_flight,
                 )
             finally:

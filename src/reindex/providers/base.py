@@ -98,6 +98,13 @@ class Provider(ABC):
     # tool (--add-dir) instead of inlining. Providers without it always
     # get INLINE transcripts from prepare_leaf.
     supports_file_transcripts: ClassVar[bool] = False
+    # True only when invoke() gives the model no tool that can act on the
+    # world (read files, run commands, call MCP servers, fetch URLs) while it
+    # reads untrusted transcript text. Duet leaves (quoted email and calendar
+    # text) run only on tool-safe providers; the CLI skips Duet otherwise.
+    # Fails closed: a provider must opt in. opencode overrides this with a
+    # property because it depends on local agent configuration.
+    tool_safe: ClassVar[bool] = False
 
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config

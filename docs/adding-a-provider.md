@@ -15,6 +15,7 @@ A provider turns `(system_prompt, user_content, schema)` into a validated Pydant
 
 - `BatchCapable` (second base class): only if the provider has a real server-side batch product — own batch IDs, polling, result retrieval, and the five methods (`run_batches`, `resume_pending`, `batch_status`, `batch_cancel`, `batch_exists`). The runner's invoke path is already a concurrent loop; wrapping it in a fake "batch" buys nothing.
 - `supports_file_transcripts = True`: only if `invoke()` can read files in `req.work_dir` through a tool (claude-cli's `--add-dir` + Read). Without it, `prepare_leaf` inlines every transcript — including >200KB ones, which may exceed your provider's context and land in the failure log. That's the honest outcome; don't point the model at files it can't open.
+- `tool_safe = True`: only if the model never gets a tool that acts on the world (reads files, runs commands, calls MCP servers, fetches URLs) while it reads transcript text. Transcripts are untrusted input. The default is `False`, and `csindex full` then skips the Duet tree with an error-level `duet_skipped_provider_not_tool_safe` log line, because Duet chat quotes email and calendar text written by other people. A forced structured-output tool, as the `anthropic` provider uses, does not count as a tool here.
 
 ## Selection & config
 

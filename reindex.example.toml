@@ -23,9 +23,12 @@ provider = "claude-cli"
 
 [reindex.sources]
 # Index the `duet/` tree (Claude Duet chat and tasks) when the export has one.
-# On by default. Set to false and nothing under duet/ is read, written, hashed
-# or embedded. Exports without a duet/ directory are unaffected either way.
-# $CSINDEX_DUET (0/false/no/off disable) and --duet/--no-duet override this.
+# On by default. With it on, Duet chat (which can quote email and calendar
+# text) is sent to the LLM provider and, with `csindex embed`, to the embedding
+# backend. Set to false and nothing under duet/ is read, written, hashed or
+# embedded. Exports without a duet/ directory are unaffected either way.
+# $CSINDEX_DUET (1/true/yes/on or 0/false/no/off; any other value is an error)
+# and --duet/--no-duet override this. `duet` is the only key in this table.
 duet = true
 
 # --- anthropic / claude-cli (same model tiers, different billing) ---

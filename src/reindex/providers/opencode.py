@@ -148,6 +148,12 @@ class OpencodeProvider(Provider):
     name = "opencode"
     supports_file_transcripts = False  # inline only; --add-dir not configured
 
+    @property
+    def tool_safe(self) -> bool:  # type: ignore[override]
+        """Only with the tool-free `quick` agent. Without it opencode runs its
+        default agent, which can read, write and run bash."""
+        return _quick_agent_path().is_file()
+
     async def preflight(self) -> None:
         # The shim is under ~/.local/share/mise/shims/; PATH may not include
         # it in all env configs. Surface a clear error rather than a confusing

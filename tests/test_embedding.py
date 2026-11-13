@@ -333,9 +333,44 @@ async def test_embed_corpus_duet_flag_gates_what_is_embedded(tmp_export, make_du
     assert on.failed == 0
     hits = await embedding.search(
         tmp_path / "vdb-on", "duet project summary", embedder=embedder, k=10,
-        kind=KIND_SUMMARY, **identity,
+        kind=KIND_SUMMARY, duet=True, **identity,
     )
     assert {h["slug"] for h in hits} == {"duet/conversations/2026-11-01-general", "duet"}
+
+
+async def test_duet_chunks_are_tagged_and_hidden_from_search_when_duet_is_off(
+    tmp_export, make_conv, make_duet, tmp_path,
+):
+    """Turning Duet off stops new uploads; chunks already stored stay on disk
+    but carry `tree: duet`, so search can leave them out (and a purge can find them)."""
+    import chromadb
+
+    make_conv("alpha", "widgets and gadgets")
+    (tmp_export / "conversations" / "alpha" / "INDEX.md").write_text("alpha summary", encoding="utf-8")
+    _duet_with_summaries(tmp_export, make_duet)
+    persist = tmp_path / "vdb"
+    embedder = _FakeEmbedder()
+    identity = {"backend": "cloudflare", "model": "fake-model"}
+    await embedding.embed_corpus(tmp_export, persist, embedder=embedder, duet=True, **identity)
+
+    metas = chromadb.PersistentClient(path=str(persist)).get_collection("conversations").get(
+        include=["metadatas"])["metadatas"]
+    is_duet = [m["slug"] == "duet" or m["slug"].startswith("duet/") for m in metas]
+    assert any(is_duet)
+    # Duet chunks are tagged; every other chunk keeps the metadata it always had.
+    assert all(m.get("tree") == "duet" for m, d in zip(metas, is_duet, strict=True) if d)
+    assert all("tree" not in m for m, d in zip(metas, is_duet, strict=True) if not d)
+
+    async def slugs(**kw) -> set[str]:
+        return {h["slug"] for h in await embedding.search(persist, "q", embedder=embedder, k=20, **kw, **identity)}
+
+    duet_slugs = {"duet", "duet/conversations/2026-11-01-general", "duet/conversations/2026-11-02-general"}
+    assert await slugs(duet=True) == {"conversations/alpha"} | duet_slugs
+    assert await slugs(duet=False) == {"conversations/alpha"}
+    assert await slugs() == {"conversations/alpha"}  # the library default hides Duet
+    assert await slugs(duet=False, kind=KIND_SUMMARY) == {"conversations/alpha"}
+    assert await slugs(duet=True, kind=KIND_SUMMARY) == {"conversations/alpha", "duet",
+                                                         "duet/conversations/2026-11-01-general"}
 
 
 async def test_embed_corpus_limit_and_empty_root_are_no_ops(tmp_export, tmp_path):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -212,6 +212,36 @@ def test_project_dirs_skips_duet_without_leaves(tmp_export, make_duet):
     assert cli._project_dirs(tmp_export, duet=True) == []
 
 
+def test_project_dirs_skips_duet_when_a_claude_project_is_named_duet(tmp_export, make_project, make_duet,
+                                                                    monkeypatch):
+    """Both would be project items with custom id `duet` in one batch, and
+    batch results are matched by custom id, so one would be lost."""
+    logger = MagicMock()
+    monkeypatch.setattr(cli.log, "get", lambda component: logger)
+    make_project("duet")
+    make_duet("2026-11-01-general")
+    assert cli._project_dirs(tmp_export, duet=True) == [tmp_export / "projects" / "duet"]
+    warned = [c for c in logger.warning.call_args_list if c.args[0] == "duet_project_skipped"]
+    assert len(warned) == 1
+    assert warned[0].kwargs["reason"] == "projects_duet_exists"
+
+
+def test_full_with_a_claude_project_named_duet_still_summarizes_duet_days(
+    tmp_export, make_conv, make_project, make_duet, fake_invoke,
+):
+    make_project("duet")
+    make_conv("x", "## Human\n_2024-01-01_\n\nhi\n", project="duet")
+    make_duet("2026-11-01-general")
+    res = runner.invoke(cli.app, ["full", "--batch-size", "1", "--log-format", "json"])
+    assert res.exit_code == exit_codes.OK, res.output
+    steps = _steps(fake_invoke)
+    assert ("leaf", "2026-11-01-general") in steps
+    assert [s for s in steps if s[0] == "project"] == [("project", "duet")]  # projects/duet only
+    assert (tmp_export / "projects" / "duet" / "INDEX.md").is_file()
+    assert not (tmp_export / "duet" / "INDEX.md").exists()
+    assert "duet_project_skipped" in res.output
+
+
 def test_project_dirs_ignores_duet_unless_enabled(tmp_export, make_duet):
     make_duet("2026-11-01-general")
     assert cli._project_dirs(tmp_export) == []
@@ -244,12 +274,18 @@ def test_gather_leaves_excludes_duet_when_disabled(tmp_export, make_conv, make_d
 # Duet: --duet/--no-duet wiring through full, embed and quick
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("command", ["quick", "full", "embed"])
+@pytest.mark.parametrize("command", ["full", "embed", "repair-hashes"])
 def test_duet_flag_in_help(command):
     res = runner.invoke(cli.app, [command, "--help"])
     assert res.exit_code == 0
     assert "--duet" in res.stdout
     assert "--no-duet" in res.stdout
+
+
+def test_quick_has_no_duet_flag(tmp_export):
+    """quick never reads duet/, so it does not pretend to take the switch."""
+    assert "--duet" not in runner.invoke(cli.app, ["quick", "--help"]).stdout
+    assert runner.invoke(cli.app, ["quick", "--duet"]).exit_code == 2  # usage error: no such option
 
 
 @pytest.fixture
@@ -335,9 +371,17 @@ def test_full_duet_only_root_is_valid(tmp_export, fake_invoke):
 
 
 @pytest.mark.parametrize("how", ["flag", "env", "toml"])
-def test_full_with_duet_disabled_never_touches_it(tmp_export, make_duet, fake_invoke, duet_touches, monkeypatch, how):
+def test_full_with_duet_disabled_never_touches_it(tmp_export, make_conv, make_duet, fake_invoke, duet_touches,
+                                                  monkeypatch, how):
+    make_conv("solo", "## Human\n_2024-01-01_\n\nhi\n")
     duet = make_duet("2026-11-01-general")
-    before = sorted(p.relative_to(duet).as_posix() for p in duet.rglob("*"))
+    # Stale indexes from an earlier Duet-on run: the root step must not pick them up.
+    fm = "---\nslug: {slug}\n{key}: {h}\n---\n\nbody\n"
+    (duet / "INDEX.md").write_text(fm.format(slug="duet", key="children_hash", h="d1"), encoding="utf-8")
+    (duet / "conversations" / "2026-11-01-general" / "INDEX.md").write_text(
+        fm.format(slug="2026-11-01-general", key="content_hash", h="c1"), encoding="utf-8",
+    )
+    before = {p.relative_to(duet).as_posix(): p.read_bytes() for p in duet.rglob("*") if p.is_file()}
     argv = ["full", "--batch-size", "1"]
     if how == "flag":
         argv.append("--no-duet")
@@ -350,11 +394,23 @@ def test_full_with_duet_disabled_never_touches_it(tmp_export, make_duet, fake_in
     res = runner.invoke(cli.app, argv)
     assert res.exit_code == exit_codes.OK, res.stdout
     assert duet_touches == []
-    assert [s for s in _steps(fake_invoke) if s[0] != "root"] == []  # no leaves, no projects
-    assert "duet" not in _root_request(fake_invoke).user_content
+    assert _steps(fake_invoke) == [("leaf", "solo"), ("root", "root")]  # no Duet leaf, no Duet project
+    root_payload = _root_request(fake_invoke).user_content
+    assert "duet" not in root_payload.lower()
+    assert "=== standalone/solo ===" in root_payload
     assert (tmp_export / "INDEX.md").is_file()
-    after = sorted(p.relative_to(duet).as_posix() for p in duet.rglob("*"))
+    after = {p.relative_to(duet).as_posix(): p.read_bytes() for p in duet.rglob("*") if p.is_file()}
     assert after == before
+
+
+def test_full_duet_only_root_with_duet_off_makes_no_root_call(tmp_export, make_duet, fake_invoke):
+    """Nothing to aggregate: no root-tier call and no empty root INDEX.md."""
+    make_duet("2026-11-01-general")
+    res = runner.invoke(cli.app, ["full", "--no-duet", "--batch-size", "1", "--log-format", "json"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert _steps(fake_invoke) == []
+    assert not (tmp_export / "INDEX.md").exists()
+    assert "root_skipped" in res.output
 
 
 def test_duet_touch_spy_is_not_vacuous(tmp_export, make_duet, fake_invoke, duet_touches):
@@ -366,6 +422,33 @@ def test_duet_touch_spy_is_not_vacuous(tmp_export, make_duet, fake_invoke, duet_
     ops = {op for op, _ in duet_touches}
     assert {"read_text", "iterdir"} <= ops
     assert ops & {"write_text", "open", "replace", "rename"}
+
+
+def test_full_skips_duet_on_a_provider_that_is_not_tool_safe(
+    tmp_export, make_conv, make_duet, duet_touches, valid_leaf, valid_root, monkeypatch, tmp_path_factory,
+):
+    """opencode without its tool-free agent keeps read/write/bash; Duet text
+    (quoted email, calendar) must never reach it, so Duet fails closed."""
+    from reindex.providers.base import InvokeResult
+    from reindex.providers.opencode import OpencodeProvider
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))  # no `quick` agent
+    make_conv("solo", "## Human\n_2024-01-01_\n\nhi\n")
+    make_duet("2026-11-01-general")
+    payloads = {"leaf": valid_leaf, "root": valid_root}
+    invoke = AsyncMock(side_effect=lambda req: InvokeResult(payload=payloads[req.step], cost=0.0))
+    monkeypatch.setattr(OpencodeProvider, "preflight", AsyncMock())
+    monkeypatch.setattr(OpencodeProvider, "invoke", invoke)
+    duet_touches.clear()
+
+    res = runner.invoke(cli.app, ["full", "--provider", "opencode", "--batch-size", "1", "--log-format", "json"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert [(c.args[0].step, c.args[0].slug) for c in invoke.await_args_list] == [("leaf", "solo"), ("root", "root")]
+    assert duet_touches == []
+    skip_lines = [ln for ln in res.output.splitlines() if "duet_skipped_provider_not_tool_safe" in ln]
+    assert len(skip_lines) == 1
+    assert '"level": "error"' in skip_lines[0]
 
 
 def test_full_duet_flag_overrides_env_and_toml(tmp_export, make_duet, fake_invoke, monkeypatch):
@@ -393,7 +476,9 @@ def test_full_root_cache_key_unchanged_for_existing_export(tmp_export, make_conv
 def test_full_invalid_toml_duet_value_exits(tmp_export, fake_invoke):
     (tmp_export / "reindex.toml").write_text('[reindex.sources]\nduet = "maybe"\n', encoding="utf-8")
     res = runner.invoke(cli.app, ["full", "--batch-size", "1"])
-    assert res.exit_code != exit_codes.OK
+    assert res.exit_code == 1
+    assert "[reindex.sources].duet in reindex.toml must be true or false, got 'maybe'" in res.output
+    assert fake_invoke.await_count == 0
 
 
 def _embed_env(monkeypatch):
@@ -426,12 +511,54 @@ def test_embed_passes_resolved_duet_setting(tmp_export, monkeypatch, argv, env, 
     assert corpus_mock.await_args.kwargs["duet"] is expected
 
 
-@pytest.mark.parametrize("flag", ["--duet", "--no-duet"])
-def test_quick_accepts_duet_flags(tmp_export, monkeypatch, flag):
+@pytest.mark.parametrize("how", ["toml", "env"])
+def test_quick_never_reads_the_duet_setting(tmp_export, monkeypatch, how):
+    """A malformed Duet setting cannot fail quick, which never uses it."""
     import subprocess
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude")
     monkeypatch.setattr("subprocess.run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0))
-    assert runner.invoke(cli.app, ["quick", flag]).exit_code == 0
+    if how == "toml":
+        (tmp_export / "reindex.toml").write_text('[reindex.sources]\nduet = "off"\n', encoding="utf-8")
+    else:
+        monkeypatch.setenv("CSINDEX_DUET", "fasle")
+    res = runner.invoke(cli.app, ["quick"])
+    assert res.exit_code == 0, res.output
+
+
+def test_full_reads_duet_switch_from_export_dotenv(tmp_export, make_conv, make_duet, fake_invoke, duet_touches,
+                                                   monkeypatch):
+    from dotenv import load_dotenv
+    monkeypatch.setattr(cli, "load_dotenv", load_dotenv)  # the real loader, not fake_invoke's stub
+    # Leave CSINDEX_DUET absent but recorded, so monkeypatch removes what .env sets.
+    monkeypatch.setenv("CSINDEX_DUET", "placeholder")
+    monkeypatch.delenv("CSINDEX_DUET")
+    (tmp_export / ".env").write_text("CSINDEX_DUET=off\n", encoding="utf-8")
+    make_conv("solo", "## Human\n_2024-01-01_\n\nhi\n")
+    make_duet("2026-11-01-general")
+    duet_touches.clear()
+
+    res = runner.invoke(cli.app, ["full", "--batch-size", "1"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert duet_touches == []
+    assert _steps(fake_invoke) == [("leaf", "solo"), ("root", "root")]
+
+
+def test_embed_reads_duet_switch_from_export_dotenv(tmp_export, monkeypatch):
+    from dotenv import load_dotenv
+
+    from reindex import embedding
+    _embed_env(monkeypatch)
+    monkeypatch.setattr(cli, "load_dotenv", load_dotenv)
+    monkeypatch.setenv("CSINDEX_DUET", "placeholder")
+    monkeypatch.delenv("CSINDEX_DUET")
+    (tmp_export / ".env").write_text("CSINDEX_DUET=off\n", encoding="utf-8")
+    corpus_mock = AsyncMock(return_value=embedding.EmbedStats())
+    monkeypatch.setattr(embedding, "embed_corpus", corpus_mock)
+
+    res = runner.invoke(cli.app, ["embed"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert corpus_mock.await_args.kwargs["duet"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +610,25 @@ def test_full_api_resume_pending_runs_first(tmp_export, fake_api_key, monkeypatc
 
     assert res.exit_code == exit_codes.OK
     resume_mock.assert_called_once()
+
+
+@pytest.mark.parametrize(("flag", "written"), [("--no-duet", False), ("--duet", True)])
+def test_full_resume_honours_the_duet_setting_for_pending_duet_items(
+    tmp_export, pending_duet_leaf, fake_api_key, monkeypatch, flag, written,
+):
+    """A batch submitted while Duet was on must not write into duet/ after
+    Duet is turned off."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda *a, **k: None)
+    out, drain = pending_duet_leaf
+
+    async def noop_run(**kwargs):
+        return None
+
+    with patch("reindex.batch.resume_pending", new=drain), patch("reindex.batch.run", new=noop_run):
+        res = runner.invoke(cli.app, ["full", "--api", "--only-leaves", flag])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert out.is_file() is written
+    assert ("duet_item_skipped" in res.output) is not written
 
 
 # ---------------------------------------------------------------------------
@@ -737,6 +883,28 @@ def test_search_e2e_success(tmp_export, monkeypatch):
     assert "hello world" in res.stdout
 
 
+@pytest.mark.parametrize(("env", "toml", "expected"), [
+    (None, None, True),
+    ("off", None, False),
+    (None, "false", False),
+])
+def test_search_passes_the_resolved_duet_setting(tmp_export, monkeypatch, env, toml, expected):
+    monkeypatch.setenv("CSINDEX_EMBED_BACKEND", "cloudflare")
+    monkeypatch.setenv("CF_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CF_API_TOKEN", "tok")
+    if env:
+        monkeypatch.setenv("CSINDEX_DUET", env)
+    if toml:
+        (tmp_export / "reindex.toml").write_text(f"[reindex.sources]\nduet = {toml}\n", encoding="utf-8")
+    from reindex import embedding
+    search_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(embedding, "search", search_mock)
+
+    res = runner.invoke(cli.app, ["search", "hello"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert search_mock.await_args.kwargs["duet"] is expected
+
+
 def test_embed_migrate_e2e_success(tmp_export, monkeypatch):
     from reindex import embedding
     monkeypatch.setattr(embedding, "backfill_kind", lambda persist_dir: 3)
@@ -863,3 +1031,5 @@ def test_quick_pipes_packaged_prompt_to_claude(tmp_export, monkeypatch):
     assert calls["argv"][0] == "claude"
     assert "{{EXPORT_DIR}}" not in calls["input"]
     assert "METADATA.json" in calls["input"]
+    # quick runs an acceptEdits agent over the whole root; duet/ is protected like the rest.
+    assert "Do not modify anything inside conversations/, projects/ or duet/." in calls["input"]

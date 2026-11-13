@@ -182,7 +182,9 @@ def resolve_provider_name(
     return coerce_provider_name(_read_toml(export_root).get("provider", DEFAULT_PROVIDER))
 
 
-_DUET_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+_DUET_ON_VALUES = ("1", "true", "yes", "on")
+_DUET_OFF_VALUES = ("0", "false", "no", "off")
+_SOURCES_KEYS = ("duet",)
 
 
 def resolve_duet(export_root: Path, cli_value: bool | None = None) -> bool:
@@ -190,19 +192,48 @@ def resolve_duet(export_root: Path, cli_value: bool | None = None) -> bool:
     $CSINDEX_DUET > `[reindex.sources].duet` in reindex.toml > True.
 
     `cli_value` is None when neither --duet nor --no-duet was given, so env
-    and TOML still apply. Env: 0/false/no/off (any case) disable; any other
-    non-empty value enables; empty counts as unset, like $CSINDEX_PROVIDER."""
+    and TOML still apply. The switch never fails open: env accepts only
+    1/true/yes/on and 0/false/no/off (any case, trimmed; empty counts as
+    unset, like $CSINDEX_PROVIDER), the TOML value must be a boolean, and an
+    unknown key under [reindex.sources] is an error. Anything else exits.
+
+    Call it after `<export>/.env` is loaded so $CSINDEX_DUET there applies."""
     if cli_value is not None:
         return cli_value
     env = os.environ.get("CSINDEX_DUET", "").strip()
     if env:
-        return env.lower() not in _DUET_OFF_VALUES
-    value = _read_toml(export_root).get("sources", {}).get("duet", True)
-    if not isinstance(value, bool):
+        if env.lower() in _DUET_ON_VALUES:
+            return True
+        if env.lower() in _DUET_OFF_VALUES:
+            return False
         raise SystemExit(
-            f"[reindex.sources].duet in reindex.toml must be true or false, got {value!r}"
+            f"$CSINDEX_DUET must be one of {', '.join(_DUET_ON_VALUES)} (index duet/) or "
+            f"{', '.join(_DUET_OFF_VALUES)} (skip it), got {env!r}"
         )
-    return value
+    sources = _read_toml(export_root).get("sources", {})
+    if not isinstance(sources, dict):
+        raise SystemExit(f"[reindex.sources] in reindex.toml must be a table, got {sources!r}")
+    unknown = sorted(set(sources) - set(_SOURCES_KEYS))
+    if unknown:
+        raise SystemExit(
+            f"unknown key(s) {', '.join(map(repr, unknown))} under [reindex.sources] in reindex.toml; "
+            f"valid keys: {', '.join(_SOURCES_KEYS)}"
+        )
+    if "duet" in sources:
+        value = sources["duet"]
+        if not isinstance(value, bool):
+            raise SystemExit(
+                f"[reindex.sources].duet in reindex.toml must be true or false, got {value!r}"
+            )
+        return value
+    if (export_root / "duet").is_dir():
+        log.get("config").info(
+            "duet_default_on",
+            hint="Duet chat, which can quote email and calendar text, is sent to the configured "
+            "LLM provider and, with `csindex embed`, to the embedding backend. Choose explicitly "
+            "with --duet/--no-duet, $CSINDEX_DUET or [reindex.sources].duet in reindex.toml.",
+        )
+    return True
 
 
 def _tiers_from_toml(base: ModelTiers, section: dict[str, Any]) -> ModelTiers:

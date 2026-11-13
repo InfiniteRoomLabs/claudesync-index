@@ -22,6 +22,7 @@ import typer
 from dotenv import load_dotenv
 
 from reindex import config, exit_codes, hashing, log, paths, stamp
+from reindex.cli_options import DuetOption
 from reindex.lockfile import single_instance
 
 app = typer.Typer(no_args_is_help=False, add_completion=False)
@@ -47,6 +48,7 @@ def repair_hashes(
     dry_run: bool = typer.Option(False, "--dry-run"),
     log_level: str = typer.Option(None, "--log-level"),
     log_format: str = typer.Option(None, "--log-format"),
+    duet: DuetOption = None,
 ) -> None:
     """Recompute content_hash, children_hash, inputs_hash for existing INDEX.md files."""
     # `--root` is accepted both before the subcommand (parsed by the cli app
@@ -57,13 +59,13 @@ def repair_hashes(
         paths.set_requested_root(root)
     from reindex.cli import _require_root_or_exit
     _require_root_or_exit()
-    # No CLI flag here: env and reindex.toml decide, so repair stamps the same
-    # root hash that `csindex full` computes under the same configuration.
-    duet_on = config.resolve_duet(paths.EXPORT_ROOT)
 
     load_dotenv(paths.EXPORT_ROOT / ".env")
     log.configure(level=log_level, fmt=log_format)
     rl = log.get("repair")
+    # Same flag, precedence and .env handling as `csindex full`, so repair
+    # stamps the root hash that `full` computes under the same setting.
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     try:
         with single_instance(paths.EXPORT_ROOT):

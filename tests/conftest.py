@@ -151,6 +151,33 @@ def make_duet(tmp_export: Path):
 
 
 @pytest.fixture
+def pending_duet_leaf(tmp_export: Path, make_duet, valid_leaf):
+    """A persisted leaf batch for one Duet day, as `full` leaves it when it
+    submits with Duet on and exits. Returns (index_path, drain): the INDEX.md
+    a resume would write, and a stand-in for a provider's resume_pending that
+    finalizes every persisted item with a valid payload."""
+    from reindex.state import BatchState, PersistedItem
+
+    day = make_duet("2026-11-01-general") / "conversations" / "2026-11-01-general"
+    out = day / "INDEX.md"
+    BatchState(tmp_export).add(
+        batch_id="msgbatch_duet", step="leaf", model="claude-haiku-4-5",
+        items=[PersistedItem(custom_id=day.name, step_kwargs={
+            "out_file": str(out), "content_hash": "h" * 64, "slug": day.name,
+            "generated_at": "2026-11-13T00:00:00Z", "model": "claude-haiku-4-5", "duet": True,
+        })],
+    )
+
+    async def drain(*, state, finalize_persisted, **_):
+        for pb in state.load():
+            for it in pb.items:
+                await finalize_persisted(pb.step, it.step_kwargs, valid_leaf, 0.0, 1, 0)
+            state.remove(pb.batch_id)
+
+    return out, drain
+
+
+@pytest.fixture
 def duet_touches(tmp_export: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     """Records every content-level pathlib call (read, write, open, list, glob,
     create) made on a path below `<export>/duet`. A test that expects Duet to

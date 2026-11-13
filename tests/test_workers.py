@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from reindex import workers
 from reindex.workers import (
     LeafItem,
     ProjectItem,
@@ -185,13 +187,23 @@ def test_prepare_project_includes_child_index(tmp_export, make_project, make_con
 # prepare_root
 # ---------------------------------------------------------------------------
 
+def _one_standalone_index(root: Path) -> None:
+    """The smallest export the root step has something to aggregate in."""
+    (root / "conversations" / "foo").mkdir(parents=True)
+    (root / "conversations" / "foo" / "INDEX.md").write_text(
+        "---\nslug: foo\ncontent_hash: c1\n---\n\nbody\n", encoding="utf-8",
+    )
+
+
 def test_prepare_root_cache_miss(tmp_export):
+    _one_standalone_index(tmp_export)
     item = prepare_root(tmp_export)
     assert item is not None
     assert item.inputs_hash != ""
 
 
 def test_prepare_root_cache_hit(tmp_export):
+    _one_standalone_index(tmp_export)
     item = prepare_root(tmp_export)
     assert item is not None
     (tmp_export / "INDEX.md").write_text(
@@ -202,6 +214,7 @@ def test_prepare_root_cache_hit(tmp_export):
 
 
 def test_prepare_root_force_bypasses_cache(tmp_export):
+    _one_standalone_index(tmp_export)
     item = prepare_root(tmp_export)
     assert item is not None
     (tmp_export / "INDEX.md").write_text(
@@ -272,16 +285,107 @@ def test_prepare_root_duet_cache_hit_and_miss(tmp_export):
     assert prepare_root(tmp_export, duet=False) is not None
 
 
-def test_prepare_root_never_reads_duet_when_disabled(tmp_export, monkeypatch):
-    from reindex import hashing
+def test_prepare_root_never_reads_duet_when_disabled(tmp_export, duet_touches):
     _root_tree_with_duet(tmp_export)
-    touched: list[Path] = []
-    real_fm, real_head = hashing.read_frontmatter_field, hashing.frontmatter_head
-    monkeypatch.setattr(hashing, "read_frontmatter_field", lambda p, f: (touched.append(p), real_fm(p, f))[1])
-    monkeypatch.setattr(hashing, "frontmatter_head", lambda p: (touched.append(p), real_head(p))[1])
-    prepare_root(tmp_export, duet=False)
-    assert touched
-    assert not [p for p in touched if "duet" in p.parts]
+    duet_touches.clear()
+    assert prepare_root(tmp_export, duet=False) is not None
+    assert duet_touches == []
+
+
+def test_prepare_root_preamble_names_duet_only_when_it_is_included(tmp_export):
+    _root_tree_with_duet(tmp_export)
+    on = prepare_root(tmp_export, duet=True)
+    assert on.user_content.startswith("Project, standalone and Duet INDEX.md frontmatters follow:\n\n")
+    # Duet off (or absent): the preamble main has always sent, byte for byte.
+    off = prepare_root(tmp_export, duet=False)
+    assert off.user_content.startswith("Project + standalone INDEX.md frontmatters follow:\n\n")
+    assert "Duet" not in off.user_content
+
+
+@pytest.fixture
+def worker_log(monkeypatch) -> MagicMock:
+    logger = MagicMock()
+    monkeypatch.setattr(workers.log, "get", lambda component: logger)
+    return logger
+
+
+def test_prepare_root_skips_when_there_is_nothing_to_aggregate(tmp_export, worker_log):
+    """An empty export, or a Duet-only root with Duet off, has no inputs: no
+    root call is made and no empty root INDEX.md is written."""
+    assert prepare_root(tmp_export) is None
+    (tmp_export / "duet").mkdir()
+    _write_fm(tmp_export / "duet" / "INDEX.md", slug="duet", children_hash="d1")
+    assert prepare_root(tmp_export, duet=False) is None
+    assert prepare_root(tmp_export, duet=True) is not None
+    skipped = [c for c in worker_log.info.call_args_list if c.args[0] == "root_skipped"]
+    assert len(skipped) == 2
+    assert skipped[0].kwargs["reason"] == "nothing_to_aggregate"
+
+
+# ---------------------------------------------------------------------------
+# Duet marker on persisted batch items (a batch submitted with Duet on must
+# not finalize into duet/ after Duet is turned off)
+# ---------------------------------------------------------------------------
+
+def test_duet_leaves_and_project_carry_the_marker(tmp_export, make_conv, make_project, make_duet):
+    duet = make_duet("2026-11-01-general")
+    day = prepare_leaf(duet / "conversations" / "2026-11-01-general")
+    assert serialize_leaf_item(day)["duet"] is True
+    assert serialize_project_item(prepare_project(duet))["duet"] is True
+    # Ordinary items, including a claude.ai project literally named "duet",
+    # persist exactly the fields they always did.
+    make_project("duet")
+    nested = prepare_leaf(make_conv("x", "content", project="duet"))
+    for d in (serialize_leaf_item(prepare_leaf(make_conv("alpha", "content"))),
+              serialize_leaf_item(nested),
+              serialize_project_item(prepare_project(tmp_export / "projects" / "duet"))):
+        assert "duet" not in d
+
+
+def test_root_item_carries_the_marker_only_when_its_payload_includes_duet(tmp_export):
+    _root_tree_with_duet(tmp_export)
+    assert serialize_root_item(prepare_root(tmp_export, duet=True))["duet"] is True
+    assert "duet" not in serialize_root_item(prepare_root(tmp_export, duet=False))
+
+
+def _persisted_kwargs(tmp_export: Path, step: str, *, duet: bool) -> tuple[dict, Path]:
+    out_dir = {"leaf": tmp_export / "duet" / "conversations" / "d", "project": tmp_export / "duet",
+               "root": tmp_export}[step]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "INDEX.md"
+    kwargs = {"out_file": str(out), "slug": "s", "generated_at": "2026-01-01T00:00:00Z", "model": "m",
+              {"leaf": "content_hash", "project": "children_hash", "root": "inputs_hash"}[step]: "h" * 64}
+    if duet:
+        kwargs["duet"] = True
+    return kwargs, out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["leaf", "project", "root"])
+async def test_finalize_persisted_skips_duet_items_unless_duet_is_on(
+    tmp_export, step, valid_leaf, valid_project, valid_root, worker_log,
+):
+    payload = {"leaf": valid_leaf, "project": valid_project, "root": valid_root}[step]
+    kwargs, out = _persisted_kwargs(tmp_export, step, duet=True)
+
+    await finalize_persisted(step, kwargs, payload, 0.0, 1, 0)  # fails closed without the setting
+    await finalize_persisted(step, kwargs, payload, 0.0, 1, 0, duet=False)
+    assert not out.exists()
+    skipped = [c for c in worker_log.warning.call_args_list if c.args[0] == "duet_item_skipped"]
+    assert len(skipped) == 2
+    assert skipped[0].kwargs["step"] == step
+
+    await finalize_persisted(step, kwargs, payload, 0.0, 1, 0, duet=True)
+    assert out.is_file()
+
+
+@pytest.mark.asyncio
+async def test_finalize_persisted_ordinary_items_ignore_the_duet_setting(tmp_export, make_conv, valid_leaf):
+    conv = make_conv("foo", "content")
+    kwargs = {"out_file": str(conv / "INDEX.md"), "content_hash": "z" * 64, "slug": "foo",
+              "generated_at": "2026-01-01T00:00:00Z", "model": "m"}
+    await finalize_persisted("leaf", kwargs, valid_leaf, 0.0, 1, 0, duet=False)
+    assert (conv / "INDEX.md").is_file()
 
 
 def test_prepare_project_for_duet_dir(tmp_export, make_duet):

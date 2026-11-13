@@ -25,6 +25,10 @@ loop — the runner's invoke path already is that loop.
 Set supports_file_transcripts=True ONLY if invoke() can actually read
 work_dir files via a tool (claude-cli's --add-dir Read loop). Otherwise
 prepare_leaf inlines all transcripts for you.
+
+Set tool_safe=True ONLY if the model gets no tool that acts on the world
+(files, commands, MCP servers, URLs) while it reads transcript text. The
+default False makes `csindex full` skip the Duet tree on this provider.
 """
 
 from __future__ import annotations

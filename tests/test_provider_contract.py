@@ -155,3 +155,23 @@ async def test_garbage_output_raises_provider_failure(name, cls):
             await provider.invoke(_req())
     assert exc_info.value.kind
     assert exc_info.value.provider == name
+
+
+@pytest.mark.parametrize("name", ["claude-cli", "anthropic", "ollama"])
+def test_tool_free_providers_declare_tool_safe(name):
+    """These providers never hand the model a tool that acts on the world;
+    opencode depends on local agent config (see test_provider_opencode)."""
+    provider = _registry()[config.ProviderName(name)](config.load(Path("/nonexistent"), provider_name=name))
+    assert provider.tool_safe is True
+
+
+def test_tool_safe_fails_closed_by_default():
+    from reindex.providers.base import Provider
+
+    class Bare(Provider):
+        name = "bare"
+
+        async def invoke(self, req):  # pragma: no cover - never called
+            raise NotImplementedError
+
+    assert Bare.tool_safe is False

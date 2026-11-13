@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from reindex import exit_codes, hashing, repair
@@ -141,6 +142,52 @@ def test_repair_ignores_duet_when_disabled(tmp_export, make_duet, monkeypatch, d
     assert res.exit_code == exit_codes.OK
     assert duet_touches == []
     assert {p: p.read_bytes() for p in duet.rglob("*") if p.is_file()} == snapshot
+    expected = hashing.root_inputs_hash(tmp_export)  # duet off
+    assert f"inputs_hash: {expected}" in (tmp_export / "INDEX.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("argv", "env", "duet_on"), [
+    (["--no-duet"], None, False),
+    (["--no-duet"], "on", False),
+    (["--duet"], "off", True),
+    ([], "off", False),
+])
+def test_repair_duet_flag_has_the_same_precedence_as_full(
+    tmp_export, make_duet, monkeypatch, duet_touches, argv, env, duet_on,
+):
+    """After `full --no-duet`, `repair-hashes --no-duet` must stamp the
+    Duet-free root key that `full --no-duet` computes, or the next run would
+    cache-hit on a root body that never saw Duet."""
+    monkeypatch.setattr(repair, "load_dotenv", lambda *a, **k: None)
+    if env:
+        monkeypatch.setenv("CSINDEX_DUET", env)
+    duet = _duet_with_indexes(tmp_export, make_duet)
+    snapshot = {p: p.read_bytes() for p in duet.rglob("*") if p.is_file()}
+    duet_touches.clear()
+
+    res = runner.invoke(repair.app, argv)
+    assert res.exit_code == exit_codes.OK, res.output
+    if duet_on:
+        assert duet_touches
+    else:
+        assert duet_touches == []
+        assert {p: p.read_bytes() for p in duet.rglob("*") if p.is_file()} == snapshot
+    expected = hashing.root_inputs_hash(tmp_export, duet=duet_on)
+    assert f"inputs_hash: {expected}" in (tmp_export / "INDEX.md").read_text(encoding="utf-8")
+
+
+def test_repair_reads_duet_switch_from_export_dotenv(tmp_export, make_duet, monkeypatch, duet_touches):
+    # Real .env loading. Leave CSINDEX_DUET absent but recorded, so monkeypatch
+    # removes what load_dotenv sets when the test ends.
+    monkeypatch.setenv("CSINDEX_DUET", "placeholder")
+    monkeypatch.delenv("CSINDEX_DUET")
+    (tmp_export / ".env").write_text("CSINDEX_DUET=off\n", encoding="utf-8")
+    _duet_with_indexes(tmp_export, make_duet)
+    duet_touches.clear()
+
+    res = runner.invoke(repair.app, [])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert duet_touches == []
     expected = hashing.root_inputs_hash(tmp_export)  # duet off
     assert f"inputs_hash: {expected}" in (tmp_export / "INDEX.md").read_text(encoding="utf-8")
 

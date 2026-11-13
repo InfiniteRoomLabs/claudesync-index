@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -218,11 +219,90 @@ def test_duet_env_disables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valu
     assert config.resolve_duet(tmp_path) is False
 
 
-@pytest.mark.parametrize("value", ["1", "true", "yes", "on", "anything"])
-def test_duet_env_anything_else_enables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str):
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " On "])
+def test_duet_env_enables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str):
     monkeypatch.setenv("CSINDEX_DUET", value)
     _write_duet_toml(tmp_path, "false")  # env beats toml
     assert config.resolve_duet(tmp_path) is True
+
+
+@pytest.mark.parametrize("value", ["fasle", "disabled", "n", "2", "enable"])
+def test_duet_env_unrecognized_value_exits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str):
+    """A typo must not silently index (and bill) Duet: fail closed with the accepted values."""
+    monkeypatch.setenv("CSINDEX_DUET", value)
+    _write_duet_toml(tmp_path, "false")
+    with pytest.raises(SystemExit) as exc_info:
+        config.resolve_duet(tmp_path)
+    msg = str(exc_info.value)
+    assert "CSINDEX_DUET" in msg
+    assert repr(value) in msg
+    assert "1, true, yes, on" in msg
+    assert "0, false, no, off" in msg
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_unknown_sources_key_exits_naming_valid_keys(tmp_path: Path):
+    (tmp_path / "reindex.toml").write_text("[reindex.sources]\ndeut = false\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc_info:
+        config.resolve_duet(tmp_path)
+    msg = str(exc_info.value)
+    assert "'deut'" in msg
+    assert "[reindex.sources]" in msg
+    assert "valid keys: duet" in msg
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+@pytest.mark.parametrize("toml_text", ['[reindex]\nsources = "x"\n', "[reindex]\nsources = 1\n"])
+def test_duet_sources_must_be_a_table(tmp_path: Path, toml_text: str):
+    (tmp_path / "reindex.toml").write_text(toml_text, encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"\[reindex\.sources\] in reindex\.toml must be a table"):
+        config.resolve_duet(tmp_path)
+
+
+# A8: one info line when Duet runs on the default, so the default is never silent.
+
+@pytest.fixture
+def config_log(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    logger = MagicMock()
+    monkeypatch.setattr(config.log, "get", lambda component: logger)
+    return logger
+
+
+def _events(logger: MagicMock) -> list[str]:
+    return [c.args[0] for c in logger.info.call_args_list]
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_default_logs_one_info_line_when_duet_exists(tmp_path: Path, config_log: MagicMock):
+    (tmp_path / "duet").mkdir()
+    assert config.resolve_duet(tmp_path) is True
+    assert _events(config_log) == ["duet_default_on"]
+    hint = config_log.info.call_args.kwargs["hint"]
+    assert "LLM provider" in hint
+    assert "embedding backend" in hint
+
+
+@pytest.mark.usefixtures("_no_duet_env")
+def test_duet_default_is_silent_without_a_duet_dir(tmp_path: Path, config_log: MagicMock):
+    assert config.resolve_duet(tmp_path) is True
+    assert _events(config_log) == []
+
+
+@pytest.mark.parametrize("how", ["cli", "env", "toml"])
+def test_duet_explicit_setting_never_logs_the_default_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_log: MagicMock, how: str,
+):
+    monkeypatch.delenv("CSINDEX_DUET", raising=False)
+    (tmp_path / "duet").mkdir()
+    cli_value = None
+    if how == "cli":
+        cli_value = True
+    elif how == "env":
+        monkeypatch.setenv("CSINDEX_DUET", "on")
+    else:
+        _write_duet_toml(tmp_path, "true")
+    assert config.resolve_duet(tmp_path, cli_value) is True
+    assert _events(config_log) == []
 
 
 def test_duet_empty_env_is_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
