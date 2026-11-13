@@ -215,6 +215,46 @@ def test_iter_sources_respects_conversations_and_summaries_flags(tmp_export, mak
     assert {s.kind for s in summ_only} == {KIND_SUMMARY}
 
 
+def _duet_with_summaries(tmp_export, make_duet) -> None:
+    duet = make_duet("2026-11-01-general", "2026-11-02-general")
+    (duet / "conversations" / "2026-11-01-general" / "INDEX.md").write_text("day summary", encoding="utf-8")
+    (duet / "INDEX.md").write_text("duet project summary", encoding="utf-8")
+
+
+def test_iter_sources_includes_duet_leaves_and_summary_when_enabled(tmp_export, make_duet):
+    _duet_with_summaries(tmp_export, make_duet)
+    pairs = {(s.slug, s.kind) for s in embedding.iter_sources(tmp_export, duet=True)}
+    assert ("duet/conversations/2026-11-01-general", KIND_CONVERSATION) in pairs
+    assert ("duet/conversations/2026-11-02-general", KIND_CONVERSATION) in pairs
+    assert ("duet/conversations/2026-11-01-general", KIND_SUMMARY) in pairs
+    assert ("duet", KIND_SUMMARY) in pairs
+    # Day 2 has no INDEX.md yet, so it contributes only its conversation.
+    assert ("duet/conversations/2026-11-02-general", KIND_SUMMARY) not in pairs
+
+
+def test_iter_sources_duet_respects_conversations_and_summaries_flags(tmp_export, make_duet):
+    _duet_with_summaries(tmp_export, make_duet)
+    conv_only = list(embedding.iter_sources(tmp_export, summaries=False, duet=True))
+    assert {s.kind for s in conv_only} == {KIND_CONVERSATION}
+    assert len(conv_only) == 2
+    summ_only = list(embedding.iter_sources(tmp_export, conversations=False, duet=True))
+    assert {s.kind for s in summ_only} == {KIND_SUMMARY}
+    assert {s.slug for s in summ_only} == {"duet/conversations/2026-11-01-general", "duet"}
+
+
+def test_iter_sources_excludes_duet_unless_enabled(tmp_export, make_duet):
+    _duet_with_summaries(tmp_export, make_duet)
+    assert list(embedding.iter_sources(tmp_export)) == []
+    assert list(embedding.iter_sources(tmp_export, duet=False)) == []
+
+
+def test_iter_sources_yields_existing_duet_summary_even_without_leaves(tmp_export):
+    """Embedding follows what is on disk, like projects/<slug>/INDEX.md does."""
+    (tmp_export / "duet").mkdir()
+    (tmp_export / "duet" / "INDEX.md").write_text("stale", encoding="utf-8")
+    assert {s.slug for s in embedding.iter_sources(tmp_export, duet=True)} == {"duet"}
+
+
 # ---------------------------------------------------------------------------
 # embed_corpus / search / backfill_kind -- fake embedder, real local chromadb
 # ---------------------------------------------------------------------------
@@ -273,6 +313,29 @@ async def test_embed_corpus_skips_unchanged_and_search_finds_it(tmp_export, make
         persist_dir, "widgets", embedder=embedder, k=1, kind=KIND_SUMMARY, **identity,
     )
     assert no_hits == []
+
+
+async def test_embed_corpus_duet_flag_gates_what_is_embedded(tmp_export, make_duet, tmp_path):
+    _duet_with_summaries(tmp_export, make_duet)
+    identity = {"backend": "cloudflare", "model": "fake-model"}
+
+    off = await embedding.embed_corpus(
+        tmp_export, tmp_path / "vdb-off", embedder=_FakeEmbedder(), **identity,
+    )
+    assert off == embedding.EmbedStats()
+
+    embedder = _FakeEmbedder()
+    on = await embedding.embed_corpus(
+        tmp_export, tmp_path / "vdb-on", embedder=embedder, duet=True, **identity,
+    )
+    # two day conversations + one day summary + the duet project summary
+    assert on.files == 4
+    assert on.failed == 0
+    hits = await embedding.search(
+        tmp_path / "vdb-on", "duet project summary", embedder=embedder, k=10,
+        kind=KIND_SUMMARY, **identity,
+    )
+    assert {h["slug"] for h in hits} == {"duet/conversations/2026-11-01-general", "duet"}
 
 
 async def test_embed_corpus_limit_and_empty_root_are_no_ops(tmp_export, tmp_path):

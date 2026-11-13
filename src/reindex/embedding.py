@@ -409,7 +409,7 @@ class Source:
         return self.slug if self.kind == KIND_CONVERSATION else f"{self.slug}::{self.kind}"
 
 
-def _leaf_dirs(root: Path) -> Iterator[Path]:
+def _leaf_dirs(root: Path, *, duet: bool = False) -> Iterator[Path]:
     conv = root / "conversations"
     if conv.is_dir():
         yield from sorted(p for p in conv.iterdir() if p.is_dir())
@@ -419,18 +419,24 @@ def _leaf_dirs(root: Path) -> Iterator[Path]:
             c = proj / "conversations"
             if c.is_dir():
                 yield from sorted(p for p in c.iterdir() if p.is_dir())
+    if duet:
+        c = root / "duet" / "conversations"
+        if c.is_dir():
+            yield from sorted(p for p in c.iterdir() if p.is_dir())
 
 
 def iter_sources(
-    root: Path, *, conversations: bool = True, summaries: bool = True,
+    root: Path, *, conversations: bool = True, summaries: bool = True, duet: bool = False,
 ) -> Iterator[Source]:
     """Yield embeddable Sources. `conversations` = raw conversation.md at each
     leaf. `summaries` = generated INDEX.md at every level (leaf, project, root)
-    — the concept-dense layer agentic search beat us with."""
+    — the concept-dense layer agentic search beat us with. `duet` adds the
+    `duet/` tree (its day leaves and its project-level INDEX.md) under the same
+    two switches; off, nothing under `duet/` is touched."""
     def src(f: Path, kind: str) -> Source:
         return Source(path=f, slug=str(f.parent.relative_to(root)), kind=kind)
 
-    for d in _leaf_dirs(root):
+    for d in _leaf_dirs(root, duet=duet):
         if conversations and (f := d / "conversation.md").is_file():
             yield src(f, KIND_CONVERSATION)
         if summaries and (f := d / "INDEX.md").is_file():
@@ -443,6 +449,8 @@ def iter_sources(
             for proj in sorted(p for p in projects.iterdir() if p.is_dir()):
                 if (f := proj / "INDEX.md").is_file():
                     yield src(f, KIND_SUMMARY)
+        if duet and (f := root / "duet" / "INDEX.md").is_file():
+            yield src(f, KIND_SUMMARY)
         if (f := root / "INDEX.md").is_file():
             yield src(f, KIND_SUMMARY)
 
@@ -559,6 +567,7 @@ async def embed_corpus(
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     conversations: bool = True,
     summaries: bool = True,
+    duet: bool = False,
 ) -> EmbedStats:
     """Walk sources, chunk, embed via the configured backend, store into Chroma.
 
@@ -584,12 +593,12 @@ async def embed_corpus(
     stats = EmbedStats()
     controller = shutdown.get()
 
-    sources = list(iter_sources(root, conversations=conversations, summaries=summaries))
+    sources = list(iter_sources(root, conversations=conversations, summaries=summaries, duet=duet))
     if limit > 0:
         sources = sources[:limit]
     olog.info("embed_started", sources=len(sources), persist=str(persist_dir),
               force=force, max_in_flight=max_in_flight,
-              conversations=conversations, summaries=summaries)
+              conversations=conversations, summaries=summaries, duet=duet)
 
     sem = asyncio.Semaphore(max_in_flight)
     write_lock = asyncio.Lock()
