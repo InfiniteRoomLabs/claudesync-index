@@ -192,11 +192,11 @@ async def _run_projects(
 
 async def _run_root(
     provider: Provider, *, batch_size: int, force: bool,
-    max_in_flight: int = 4, wait: bool = False,
+    max_in_flight: int = 4, wait: bool = False, duet: bool = False,
 ) -> None:
     olog = log.get("orchestrator")
     olog.info("step_started", step="root")
-    item = workers.prepare_root(paths.EXPORT_ROOT, provider=provider, force=force)
+    item = workers.prepare_root(paths.EXPORT_ROOT, provider=provider, force=force, duet=duet)
     if item is None:
         _print_step_total("root")
         return
@@ -278,6 +278,15 @@ def _resolve_provider_flags(
     return config.resolve_provider_name(paths.EXPORT_ROOT)
 
 
+# One definition for the three commands that take --duet/--no-duet. The
+# default is None ("not given") so $CSINDEX_DUET and reindex.toml still apply.
+DuetOption = Annotated[bool | None, typer.Option(
+    "--duet/--no-duet",
+    help="Index the duet/ tree. Default: $CSINDEX_DUET, then reindex.toml "
+    "[reindex.sources].duet, then on.",
+)]
+
+
 def _gather_leaves(scope: str, limit: int, *, duet: bool = False) -> list[Path]:
     standalone = _standalone_dirs(paths.EXPORT_ROOT) if scope in ("standalone", "both") else []
     nested = _nested_dirs(paths.EXPORT_ROOT, duet=duet) if scope in ("nested", "both") else []
@@ -309,11 +318,17 @@ def quick(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+    duet: DuetOption = None,
 ) -> None:
-    """Counts + top README/METADATA only (cheap, subscription-only)."""
+    """Counts + top README/METADATA only (cheap, subscription-only).
+
+    --duet/--no-duet is accepted for a uniform surface but changes nothing
+    here: the packaged prompt only counts conversations/ and projects/ and
+    never reads duet/."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     if json_logs:
         log_format = "json"
@@ -326,6 +341,7 @@ def quick(
     _preflight_claude_binary()
 
     olog = log.get("orchestrator")
+    olog.debug("duet_setting", enabled=duet_on, used=False)
     prompt = prompt_loader.load_prompt("quick").replace("{{EXPORT_DIR}}", str(paths.EXPORT_ROOT))
     try:
         with single_instance(paths.EXPORT_ROOT):
@@ -385,6 +401,7 @@ def full(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+    duet: DuetOption = None,
 ) -> None:
     """Depth-first hierarchical index: leaves -> projects -> root.
 
@@ -393,6 +410,9 @@ def full(
 
     --max-in-flight bounds concurrent in-flight batches on batch-capable
     providers; passing it with a non-batch provider is rejected.
+
+    The duet/ tree is indexed by default; --no-duet (or $CSINDEX_DUET=off, or
+    [reindex.sources] duet = false) leaves it entirely untouched.
     """
     # `--root` is accepted both before the subcommand (parsed by the app
     # callback into paths._requested_cli_root) and here, after `full`; a
@@ -400,6 +420,7 @@ def full(
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     if json_logs:
         log_format = "json"
@@ -426,6 +447,7 @@ def full(
     _common_setup(log_level, log_format, no_color,
                   log_file=log_file, no_log_file=no_log_file)
     olog = log.get("orchestrator")
+    olog.debug("duet_setting", enabled=duet_on)
 
     # Construct AFTER dotenv so api-key preflights see .env values.
     provider = get_provider(provider_name, config.load(paths.EXPORT_ROOT, provider_name=provider_name))
@@ -463,32 +485,34 @@ def full(
                     )
 
             if only_leaves:
-                dirs = _gather_leaves(leaf_scope, limit)
+                dirs = _gather_leaves(leaf_scope, limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope=leaf_scope,
                                   max_in_flight=max_in_flight, wait=wait)
             elif only_projects:
                 if no_projects:
                     olog.warn("contradictory_flags", flag="--no-projects --only-projects")
                     raise typer.Exit(exit_codes.USAGE)
-                dirs = _gather_leaves("nested", limit)
+                dirs = _gather_leaves("nested", limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope="nested",
                                   max_in_flight=max_in_flight, wait=wait)
-                await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT), batch_size=batch_size, force=force,
+                await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT, duet=duet_on),
+                                    batch_size=batch_size, force=force,
                                     max_in_flight=max_in_flight, wait=wait)
             elif only_root:
                 await _run_root(provider, batch_size=batch_size, force=force,
-                                max_in_flight=max_in_flight, wait=wait)
+                                max_in_flight=max_in_flight, wait=wait, duet=duet_on)
             else:
-                dirs = _gather_leaves(leaf_scope, limit)
+                dirs = _gather_leaves(leaf_scope, limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope=leaf_scope,
                                   max_in_flight=max_in_flight, wait=wait)
                 if no_projects:
                     olog.info("step_skipped", step="project", reason="no_projects_flag")
                 else:
-                    await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT), batch_size=batch_size, force=force,
+                    await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT, duet=duet_on),
+                                        batch_size=batch_size, force=force,
                                         max_in_flight=max_in_flight, wait=wait)
                 await _run_root(provider, batch_size=batch_size, force=force,
-                                max_in_flight=max_in_flight, wait=wait)
+                                max_in_flight=max_in_flight, wait=wait, duet=duet_on)
         finally:
             shutdown.uninstall()
             await provider.aclose()
@@ -560,14 +584,17 @@ def embed(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+    duet: DuetOption = None,
 ) -> None:
     """EXPERIMENT: embed full conversation.md + INDEX.md summary contents into a
     local vector DB via a config-driven backend (cloudflare/openai/ollama) ->
     Chroma. Orthogonal to the index.md hierarchy. Tag each chunk
-    kind=conversation|summary for filtered search."""
+    kind=conversation|summary for filtered search. The duet/ tree is included
+    unless --no-duet (or $CSINDEX_DUET / reindex.toml) turns it off."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     from reindex import embedding
 
@@ -594,6 +621,7 @@ def embed(
                 limit=limit, max_chars=chunk_chars, overlap=overlap,
                 force=force, max_in_flight=max_in_flight,
                 conversations=not no_conversations, summaries=not no_summaries,
+                duet=duet_on,
             )
         finally:
             shutdown.uninstall()

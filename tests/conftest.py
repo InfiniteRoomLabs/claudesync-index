@@ -150,6 +150,32 @@ def make_duet(tmp_export: Path):
     return _make
 
 
+@pytest.fixture
+def duet_touches(tmp_export: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Records every content-level pathlib call (read, write, open, list, glob,
+    create) made on a path below `<export>/duet`. A test that expects Duet to
+    be invisible asserts the returned list is empty after the run."""
+    import pathlib
+
+    touched: list[tuple[str, str]] = []
+    base = len(tmp_export.parts)
+
+    def wrap(name: str) -> None:
+        real = getattr(pathlib.Path, name)
+
+        def spy(self, *args, **kwargs):
+            if "duet" in self.parts[base:]:
+                touched.append((name, str(self)))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, name, spy)
+
+    for name in ("read_text", "read_bytes", "write_text", "write_bytes", "open",
+                 "iterdir", "glob", "rglob", "mkdir", "touch", "unlink", "rename", "replace"):
+        wrap(name)
+    return touched
+
+
 # ---------------------------------------------------------------------------
 # Pydantic payload fixtures
 # ---------------------------------------------------------------------------
