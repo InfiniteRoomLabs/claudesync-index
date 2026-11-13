@@ -15,8 +15,8 @@ class InvalidExportTree(Exception):
     def __init__(self, root: Path):
         self.root = root
         super().__init__(
-            f"{root} is not a claudesync export tree (expected a 'conversations/' "
-            "or 'projects/' directory). Point --root or $CSINDEX_ROOT at an export."
+            f"{root} is not a claudesync export tree (expected a 'conversations/', "
+            "'projects/' or 'duet/' directory). Point --root or $CSINDEX_ROOT at an export."
         )
 
 
@@ -24,7 +24,7 @@ def resolve_root(cli_root: Path | None) -> Path:
     """Precedence: --root > $CSINDEX_ROOT > CWD. Validates the tree."""
     env = os.environ.get("CSINDEX_ROOT")
     root = (cli_root or (Path(env) if env else Path.cwd())).resolve()
-    if not ((root / "conversations").is_dir() or (root / "projects").is_dir()):
+    if not any((root / d).is_dir() for d in ("conversations", "projects", "duet")):
         raise InvalidExportTree(root)
     return root
 
