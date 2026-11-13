@@ -12,6 +12,7 @@ Provider selection (--provider NAME, default claude-cli):
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ from reindex import (
     workers,
 )
 from reindex import runner as runner_mod
+from reindex.cli_options import DuetOption
 from reindex.lockfile import single_instance
 from reindex.providers import BatchCapable, Provider, get_provider, provider_class
 from reindex.providers.base import ProviderFailure
@@ -96,23 +98,43 @@ def _standalone_dirs(root: Path) -> list[Path]:
     return sorted(p for p in d.iterdir() if p.is_dir())
 
 
-def _nested_dirs(root: Path) -> list[Path]:
-    d = root / "projects"
-    if not d.is_dir():
+def _duet_leaf_dirs(root: Path) -> list[Path]:
+    """Duet channel-day directories under `duet/conversations/`."""
+    c = root / "duet" / "conversations"
+    if not c.is_dir():
         return []
+    return sorted(p for p in c.iterdir() if p.is_dir())
+
+
+def _nested_dirs(root: Path, *, duet: bool = False) -> list[Path]:
     out: list[Path] = []
-    for proj in sorted(p for p in d.iterdir() if p.is_dir()):
-        c = proj / "conversations"
-        if c.is_dir():
-            out.extend(sorted(p for p in c.iterdir() if p.is_dir()))
+    d = root / "projects"
+    if d.is_dir():
+        for proj in sorted(p for p in d.iterdir() if p.is_dir()):
+            c = proj / "conversations"
+            if c.is_dir():
+                out.extend(sorted(p for p in c.iterdir() if p.is_dir()))
+    if duet:
+        out.extend(_duet_leaf_dirs(root))
     return out
 
 
-def _project_dirs(root: Path) -> list[Path]:
+def _project_dirs(root: Path, *, duet: bool = False) -> list[Path]:
     d = root / "projects"
-    if not d.is_dir():
-        return []
-    return sorted(p for p in d.iterdir() if p.is_dir())
+    out = sorted(p for p in d.iterdir() if p.is_dir()) if d.is_dir() else []
+    # `duet/` is one more project (slug `duet`), but only once it has day leaves.
+    if duet and _duet_leaf_dirs(root):
+        if (d / "duet").is_dir():
+            # A claude.ai project directory named `duet` would give two project
+            # items the custom id `duet` in one batch; results are matched by
+            # custom id, so one would be lost. The claude.ai project keeps it.
+            log.get("orchestrator").warning(
+                "duet_project_skipped", reason="projects_duet_exists",
+                hint="duet/INDEX.md is not regenerated while projects/duet exists; Duet days are still indexed",
+            )
+        else:
+            out.append(root / "duet")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +203,11 @@ async def _run_projects(
 
 async def _run_root(
     provider: Provider, *, batch_size: int, force: bool,
-    max_in_flight: int = 4, wait: bool = False,
+    max_in_flight: int = 4, wait: bool = False, duet: bool = False,
 ) -> None:
     olog = log.get("orchestrator")
     olog.info("step_started", step="root")
-    item = workers.prepare_root(paths.EXPORT_ROOT, provider=provider, force=force)
+    item = workers.prepare_root(paths.EXPORT_ROOT, provider=provider, force=force, duet=duet)
     if item is None:
         _print_step_total("root")
         return
@@ -267,9 +289,9 @@ def _resolve_provider_flags(
     return config.resolve_provider_name(paths.EXPORT_ROOT)
 
 
-def _gather_leaves(scope: str, limit: int) -> list[Path]:
+def _gather_leaves(scope: str, limit: int, *, duet: bool = False) -> list[Path]:
     standalone = _standalone_dirs(paths.EXPORT_ROOT) if scope in ("standalone", "both") else []
-    nested = _nested_dirs(paths.EXPORT_ROOT) if scope in ("nested", "both") else []
+    nested = _nested_dirs(paths.EXPORT_ROOT, duet=duet) if scope in ("nested", "both") else []
     log.get("orchestrator").debug(
         "dir_scan", standalone=len(standalone), project_nested=len(nested), scope=scope,
     )
@@ -299,7 +321,10 @@ def quick(
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
 ) -> None:
-    """Counts + top README/METADATA only (cheap, subscription-only)."""
+    """Counts + top README/METADATA only (cheap, subscription-only).
+
+    Never reads duet/, so the Duet switch does not apply: the packaged prompt
+    only counts conversations/ and projects/, and forbids touching duet/."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
@@ -374,6 +399,7 @@ def full(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+    duet: DuetOption = None,
 ) -> None:
     """Depth-first hierarchical index: leaves -> projects -> root.
 
@@ -382,6 +408,9 @@ def full(
 
     --max-in-flight bounds concurrent in-flight batches on batch-capable
     providers; passing it with a non-batch provider is rejected.
+
+    The duet/ tree is indexed by default; --no-duet (or $CSINDEX_DUET=off, or
+    [reindex.sources] duet = false) leaves it entirely untouched.
     """
     # `--root` is accepted both before the subcommand (parsed by the app
     # callback into paths._requested_cli_root) and here, after `full`; a
@@ -415,9 +444,22 @@ def full(
     _common_setup(log_level, log_format, no_color,
                   log_file=log_file, no_log_file=no_log_file)
     olog = log.get("orchestrator")
+    # After _common_setup, so $CSINDEX_DUET from <export>/.env applies.
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
+    olog.debug("duet_setting", enabled=duet_on)
 
     # Construct AFTER dotenv so api-key preflights see .env values.
     provider = get_provider(provider_name, config.load(paths.EXPORT_ROOT, provider_name=provider_name))
+    if duet_on and not provider.tool_safe:
+        # Duet chat quotes email and calendar text written by other people.
+        # It only ever reaches a model that has no tools; fail closed.
+        olog.error(
+            "duet_skipped_provider_not_tool_safe",
+            provider=provider.name,
+            hint="this provider can give the model tools; Duet is skipped for this run. "
+            "For opencode, configure the tool-free `quick` agent.",
+        )
+        duet_on = False
 
     only_set = sum([only_leaves, only_projects, only_root])
     if only_set > 1:
@@ -447,37 +489,39 @@ def full(
                     await provider.resume_pending(
                         state=state,
                         schema_for_step=lambda step: models.STEP_MODEL[step],
-                        finalize_persisted=workers.finalize_persisted,
+                        finalize_persisted=functools.partial(workers.finalize_persisted, duet=duet_on),
                         max_in_flight=max_in_flight,
                     )
 
             if only_leaves:
-                dirs = _gather_leaves(leaf_scope, limit)
+                dirs = _gather_leaves(leaf_scope, limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope=leaf_scope,
                                   max_in_flight=max_in_flight, wait=wait)
             elif only_projects:
                 if no_projects:
                     olog.warn("contradictory_flags", flag="--no-projects --only-projects")
                     raise typer.Exit(exit_codes.USAGE)
-                dirs = _gather_leaves("nested", limit)
+                dirs = _gather_leaves("nested", limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope="nested",
                                   max_in_flight=max_in_flight, wait=wait)
-                await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT), batch_size=batch_size, force=force,
+                await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT, duet=duet_on),
+                                    batch_size=batch_size, force=force,
                                     max_in_flight=max_in_flight, wait=wait)
             elif only_root:
                 await _run_root(provider, batch_size=batch_size, force=force,
-                                max_in_flight=max_in_flight, wait=wait)
+                                max_in_flight=max_in_flight, wait=wait, duet=duet_on)
             else:
-                dirs = _gather_leaves(leaf_scope, limit)
+                dirs = _gather_leaves(leaf_scope, limit, duet=duet_on)
                 await _run_leaves(provider, dirs, batch_size=batch_size, force=force, scope=leaf_scope,
                                   max_in_flight=max_in_flight, wait=wait)
                 if no_projects:
                     olog.info("step_skipped", step="project", reason="no_projects_flag")
                 else:
-                    await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT), batch_size=batch_size, force=force,
+                    await _run_projects(provider, _project_dirs(paths.EXPORT_ROOT, duet=duet_on),
+                                        batch_size=batch_size, force=force,
                                         max_in_flight=max_in_flight, wait=wait)
                 await _run_root(provider, batch_size=batch_size, force=force,
-                                max_in_flight=max_in_flight, wait=wait)
+                                max_in_flight=max_in_flight, wait=wait, duet=duet_on)
         finally:
             shutdown.uninstall()
             await provider.aclose()
@@ -549,11 +593,13 @@ def embed(
     json_logs: Annotated[bool, typer.Option("--json")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", "--debug")] = False,
+    duet: DuetOption = None,
 ) -> None:
     """EXPERIMENT: embed full conversation.md + INDEX.md summary contents into a
     local vector DB via a config-driven backend (cloudflare/openai/ollama) ->
     Chroma. Orthogonal to the index.md hierarchy. Tag each chunk
-    kind=conversation|summary for filtered search."""
+    kind=conversation|summary for filtered search. The duet/ tree is included
+    unless --no-duet (or $CSINDEX_DUET / reindex.toml) turns it off."""
     if root is not None:
         paths.set_requested_root(root)
     _require_root_or_exit()
@@ -563,6 +609,7 @@ def embed(
     level = "warn" if quiet else ("debug" if verbose else None)
     _common_setup(level, "json" if json_logs else None, no_color)
     olog = log.get("orchestrator")
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)  # after .env is loaded
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
     if no_conversations and no_summaries:
         olog.error("embed_nothing_to_do", reason="--no-conversations and --no-summaries")
@@ -583,6 +630,7 @@ def embed(
                 limit=limit, max_chars=chunk_chars, overlap=overlap,
                 force=force, max_in_flight=max_in_flight,
                 conversations=not no_conversations, summaries=not no_summaries,
+                duet=duet_on,
             )
         finally:
             shutdown.uninstall()
@@ -649,6 +697,9 @@ def search(
     from reindex import embedding
 
     _common_setup("debug" if verbose else "warn", None, no_color, no_log_file=True)
+    # Chunks embedded while Duet was on stay in the store; leave them out of
+    # results while it is off ($CSINDEX_DUET, then reindex.toml).
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT)
     persist_dir = Path(persist) if persist else paths.EXPORT_ROOT / ".vector-db"
     try:
         backend_r, model_r, base_url_r = config.resolve_embedding(backend, model, base_url, paths.EXPORT_ROOT)
@@ -661,7 +712,7 @@ def search(
         try:
             return await embedding.search(
                 persist_dir, query, embedder=embedder,
-                backend=backend_r, model=embedder.model, k=k, kind=kind,
+                backend=backend_r, model=embedder.model, k=k, kind=kind, duet=duet_on,
             )
         finally:
             await embedder.aclose()

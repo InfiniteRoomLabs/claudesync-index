@@ -44,6 +44,19 @@ def test_resolve_root_accepts_projects_only(tmp_path, monkeypatch):
     assert paths.resolve_root(None) == tmp_path.resolve()
 
 
+def test_resolve_root_accepts_duet_only(tmp_path, monkeypatch):
+    monkeypatch.delenv("CSINDEX_ROOT", raising=False)
+    (tmp_path / "duet").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert paths.resolve_root(None) == tmp_path.resolve()
+
+
+def test_invalid_export_tree_message_names_all_three_dirs(tmp_path):
+    msg = str(paths.InvalidExportTree(tmp_path))
+    for name in ("conversations/", "projects/", "duet/"):
+        assert name in msg
+
+
 def test_no_reindex_env_names_left():
     import pathlib
     import re

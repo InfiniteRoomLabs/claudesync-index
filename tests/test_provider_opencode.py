@@ -280,6 +280,18 @@ async def test_subprocess_argv_and_env(
     assert "PATH" in env
 
 
+def test_tool_safe_only_with_the_tool_free_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Without the `quick` agent opencode falls back to an agent with read,
+    write and bash, so it is not safe for untrusted (Duet) transcripts."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    provider = _provider()
+    assert provider.tool_safe is False
+    agent_dir = tmp_path / "opencode" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "quick.md").write_text("---\ntools: {}\n---\n")
+    assert provider.tool_safe is True
+
+
 def test_build_argv_includes_agent_flag_when_agent_file_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

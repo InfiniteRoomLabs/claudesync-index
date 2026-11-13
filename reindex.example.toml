@@ -2,12 +2,15 @@
 #
 # Optional config file. Copy to `reindex.toml` and place it at the root of
 # your claudesync export tree (the same directory that contains
-# `conversations/` and/or `projects/`). Every field below is optional and
+# `conversations/`, `projects/` and/or `duet/`). Every field below is optional and
 # overrides a built-in default — an export with no reindex.toml at all runs
 # fine with the defaults baked into `src/reindex/config.py`.
 #
 # Precedence for provider selection: CLI --provider > $CSINDEX_PROVIDER >
 # [reindex].provider (below) > "claude-cli".
+#
+# Precedence for the duet setting: CLI --duet/--no-duet > $CSINDEX_DUET >
+# [reindex.sources].duet (below) > true.
 #
 # The baked-in model IDs and per-token prices in config.py are point-in-time
 # defaults. When Anthropic ships new models or changes pricing, override
@@ -15,6 +18,18 @@
 
 [reindex]
 provider = "claude-cli"
+
+# --- sources ---
+
+[reindex.sources]
+# Index the `duet/` tree (Claude Duet chat and tasks) when the export has one.
+# On by default. With it on, Duet chat (which can quote email and calendar
+# text) is sent to the LLM provider and, with `csindex embed`, to the embedding
+# backend. Set to false and nothing under duet/ is read, written, hashed or
+# embedded. Exports without a duet/ directory are unaffected either way.
+# $CSINDEX_DUET (1/true/yes/on or 0/false/no/off; any other value is an error)
+# and --duet/--no-duet override this. `duet` is the only key in this table.
+duet = true
 
 # --- anthropic / claude-cli (same model tiers, different billing) ---
 

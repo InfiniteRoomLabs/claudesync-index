@@ -107,6 +107,7 @@ class LeafItem:
     system_prompt: str
     user_content: str
     transcript_mode: TranscriptMode = TranscriptMode.INLINE
+    duet: bool = False  # a Duet day; see finalize_persisted
 
 
 @dataclass
@@ -119,6 +120,7 @@ class ProjectItem:
     generated_at: str
     system_prompt: str
     user_content: str
+    duet: bool = False  # the duet/ tree itself
 
 
 @dataclass
@@ -129,6 +131,16 @@ class RootItem:
     generated_at: str
     system_prompt: str
     user_content: str
+    duet: bool = False  # the payload includes the duet/INDEX.md section
+
+
+def _in_duet_tree(path: Path) -> bool:
+    """True for paths inside the export root's `duet/` tree. A claude.ai
+    project named "duet" lives under projects/ and is not part of it."""
+    try:
+        return path.relative_to(paths.EXPORT_ROOT).parts[:1] == ("duet",)
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +215,7 @@ def prepare_leaf(conv_dir: Path, *, provider: Provider | None = None, force: boo
         system_prompt=system_prompt,
         user_content=user_content,
         transcript_mode=transcript_mode,
+        duet=_in_duet_tree(conv_dir),
     )
 
 
@@ -294,6 +307,7 @@ def prepare_project(project_dir: Path, *, provider: Provider | None = None, forc
         generated_at=generated_at,
         system_prompt=system_prompt,
         user_content=user_content,
+        duet=_in_duet_tree(project_dir),
     )
 
 
@@ -330,11 +344,13 @@ def finalize_project(
 # Root
 # ---------------------------------------------------------------------------
 
-def prepare_root(export_dir: Path, *, provider: Provider | None = None, force: bool = False) -> RootItem | None:
+def prepare_root(
+    export_dir: Path, *, provider: Provider | None = None, force: bool = False, duet: bool = False,
+) -> RootItem | None:
     provider = provider or _default_provider()
     root_log = log.get("worker")
     out_file = export_dir / "INDEX.md"
-    inputs_hash = hashing.root_inputs_hash(export_dir)
+    inputs_hash = hashing.root_inputs_hash(export_dir, duet=duet)
     model_name = provider.model_for("root")
     generated_at = _now_iso_z()
     root_log.debug("hash_computed", inputs_hash=inputs_hash)
@@ -354,10 +370,26 @@ def prepare_root(export_dir: Path, *, provider: Provider | None = None, force: b
     if convo_dir.is_dir():
         for idx in sorted(convo_dir.glob("*/INDEX.md")):
             payload_parts.append(f"=== standalone/{idx.parent.name} ===\n{hashing.frontmatter_head(idx)}")
+    duet_included = False
+    if duet and (duet_idx := export_dir / "duet" / "INDEX.md").is_file():
+        payload_parts.append(f"=== duet ===\n{hashing.frontmatter_head(duet_idx)}")
+        duet_included = True
+
+    if not payload_parts:
+        # Nothing to aggregate (an empty export, or a Duet-only root with
+        # Duet off): no root call and no empty root INDEX.md.
+        root_log.info("root_skipped", reason="nothing_to_aggregate")
+        return None
 
     children_payload = "\n\n".join(payload_parts)
     system_prompt = _read_template("root-aggregate", EXPORT_DIR=str(export_dir))
-    user_content = "Project + standalone INDEX.md frontmatters follow:\n\n" + children_payload
+    # The preamble names Duet only when its section is present, so a root
+    # without Duet keeps the exact payload it has always had.
+    preamble = (
+        "Project, standalone and Duet INDEX.md frontmatters follow:\n\n" if duet_included
+        else "Project + standalone INDEX.md frontmatters follow:\n\n"
+    )
+    user_content = preamble + children_payload
 
     return RootItem(
         out_file=out_file,
@@ -366,6 +398,7 @@ def prepare_root(export_dir: Path, *, provider: Provider | None = None, force: b
         generated_at=generated_at,
         system_prompt=system_prompt,
         user_content=user_content,
+        duet=duet_included,
     )
 
 
@@ -401,6 +434,13 @@ def finalize_root(
 # Persistence helpers (batch resumability)
 # ---------------------------------------------------------------------------
 
+# Duet items persist `"duet": true` so a batch submitted while Duet was on
+# cannot finalize into duet/ (or write a Duet-built root) after it is turned
+# off. Other items persist exactly the fields they always did.
+def _duet_marker(item: LeafItem | ProjectItem | RootItem) -> dict:
+    return {"duet": True} if item.duet else {}
+
+
 def serialize_leaf_item(item: LeafItem) -> dict:
     """Reduce a LeafItem to JSON-serializable fields needed by finalize_leaf."""
     return {
@@ -409,6 +449,7 @@ def serialize_leaf_item(item: LeafItem) -> dict:
         "slug": item.slug,
         "generated_at": item.generated_at,
         "model": item.model,
+        **_duet_marker(item),
     }
 
 
@@ -419,6 +460,7 @@ def serialize_project_item(item: ProjectItem) -> dict:
         "slug": item.slug,
         "generated_at": item.generated_at,
         "model": item.model,
+        **_duet_marker(item),
     }
 
 
@@ -428,6 +470,7 @@ def serialize_root_item(item: RootItem) -> dict:
         "inputs_hash": item.inputs_hash,
         "generated_at": item.generated_at,
         "model": item.model,
+        **_duet_marker(item),
     }
 
 
@@ -463,9 +506,19 @@ def _restore_root(d: dict) -> RootItem:
 async def finalize_persisted(
     step: str, step_kwargs: dict, payload: BaseModel,
     cost: float, turns: int, duration_ms: int,
+    *, duet: bool = False,
 ) -> None:
     """Resume-time finalizer. Reconstructs the dataclass from persisted kwargs
-    and calls the appropriate finalize_X."""
+    and calls the appropriate finalize_X.
+
+    `duet` is the current run's Duet setting. Items persisted with the Duet
+    marker are dropped (and logged) unless it is on; the default fails closed.
+    Callers bind it with functools.partial."""
+    if step_kwargs.get("duet") and not duet:
+        log.get("worker").warning(
+            "duet_item_skipped", step=step, slug=step_kwargs.get("slug", step), reason="duet_disabled",
+        )
+        return
     if step == "leaf":
         finalize_leaf(_restore_leaf(step_kwargs), payload, cost, turns, duration_ms)
     elif step == "project":

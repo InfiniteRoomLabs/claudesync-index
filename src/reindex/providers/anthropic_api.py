@@ -53,6 +53,7 @@ async def aclose() -> None:
 
 class AnthropicApiProvider(Provider, BatchCapable):
     name = "anthropic"
+    tool_safe = True  # the only tool is the forced structured-output schema
 
     async def preflight(self) -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):

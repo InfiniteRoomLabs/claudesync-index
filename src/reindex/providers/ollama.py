@@ -60,6 +60,7 @@ class OllamaProvider(Provider):
     name = "ollama"
     # Ollama has no Read-tool filesystem loop — transcripts are always inlined.
     supports_file_transcripts = False
+    tool_safe = True  # plain chat completion with a JSON format; no tools
 
     async def preflight(self) -> None:
         """Verify the Ollama server is reachable before the pipeline starts."""

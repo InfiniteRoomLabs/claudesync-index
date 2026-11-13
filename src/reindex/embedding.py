@@ -395,12 +395,18 @@ def make_embedder(backend: str, *, model: str | None, base_url: str | None) -> E
 KIND_CONVERSATION = "conversation"
 KIND_SUMMARY = "summary"
 
+# Chunks from the duet/ tree carry metadata `tree: duet` (other chunks carry no
+# `tree` key, exactly as before). Turning Duet off stops NEW uploads only; the
+# tag lets `search` leave already-stored Duet chunks out and lets a purge find them.
+TREE_DUET = "duet"
+
 
 @dataclass
 class Source:
     path: Path
     slug: str   # directory of the file, relative to the export root
     kind: str
+    duet: bool = False  # from the duet/ tree; stored as metadata `tree: duet`
 
     @property
     def id_prefix(self) -> str:
@@ -409,7 +415,7 @@ class Source:
         return self.slug if self.kind == KIND_CONVERSATION else f"{self.slug}::{self.kind}"
 
 
-def _leaf_dirs(root: Path) -> Iterator[Path]:
+def _leaf_dirs(root: Path, *, duet: bool = False) -> Iterator[Path]:
     conv = root / "conversations"
     if conv.is_dir():
         yield from sorted(p for p in conv.iterdir() if p.is_dir())
@@ -419,22 +425,31 @@ def _leaf_dirs(root: Path) -> Iterator[Path]:
             c = proj / "conversations"
             if c.is_dir():
                 yield from sorted(p for p in c.iterdir() if p.is_dir())
+    if duet:
+        c = root / "duet" / "conversations"
+        if c.is_dir():
+            yield from sorted(p for p in c.iterdir() if p.is_dir())
 
 
 def iter_sources(
-    root: Path, *, conversations: bool = True, summaries: bool = True,
+    root: Path, *, conversations: bool = True, summaries: bool = True, duet: bool = False,
 ) -> Iterator[Source]:
     """Yield embeddable Sources. `conversations` = raw conversation.md at each
     leaf. `summaries` = generated INDEX.md at every level (leaf, project, root)
-    — the concept-dense layer agentic search beat us with."""
-    def src(f: Path, kind: str) -> Source:
-        return Source(path=f, slug=str(f.parent.relative_to(root)), kind=kind)
+    — the concept-dense layer agentic search beat us with. `duet` adds the
+    `duet/` tree (its day leaves and its project-level INDEX.md) under the same
+    two switches; off, nothing under `duet/` is touched."""
+    duet_days = root / "duet" / "conversations"
 
-    for d in _leaf_dirs(root):
+    def src(f: Path, kind: str, *, in_duet: bool = False) -> Source:
+        return Source(path=f, slug=str(f.parent.relative_to(root)), kind=kind, duet=in_duet)
+
+    for d in _leaf_dirs(root, duet=duet):
+        in_duet = d.parent == duet_days
         if conversations and (f := d / "conversation.md").is_file():
-            yield src(f, KIND_CONVERSATION)
+            yield src(f, KIND_CONVERSATION, in_duet=in_duet)
         if summaries and (f := d / "INDEX.md").is_file():
-            yield src(f, KIND_SUMMARY)
+            yield src(f, KIND_SUMMARY, in_duet=in_duet)
 
     if summaries:
         # Project-aggregate and root INDEX.md — no conversation.md counterpart.
@@ -443,6 +458,8 @@ def iter_sources(
             for proj in sorted(p for p in projects.iterdir() if p.is_dir()):
                 if (f := proj / "INDEX.md").is_file():
                     yield src(f, KIND_SUMMARY)
+        if duet and (f := root / "duet" / "INDEX.md").is_file():
+            yield src(f, KIND_SUMMARY, in_duet=True)
         if (f := root / "INDEX.md").is_file():
             yield src(f, KIND_SUMMARY)
 
@@ -559,6 +576,7 @@ async def embed_corpus(
     max_in_flight: int = DEFAULT_MAX_IN_FLIGHT,
     conversations: bool = True,
     summaries: bool = True,
+    duet: bool = False,
 ) -> EmbedStats:
     """Walk sources, chunk, embed via the configured backend, store into Chroma.
 
@@ -584,12 +602,12 @@ async def embed_corpus(
     stats = EmbedStats()
     controller = shutdown.get()
 
-    sources = list(iter_sources(root, conversations=conversations, summaries=summaries))
+    sources = list(iter_sources(root, conversations=conversations, summaries=summaries, duet=duet))
     if limit > 0:
         sources = sources[:limit]
     olog.info("embed_started", sources=len(sources), persist=str(persist_dir),
               force=force, max_in_flight=max_in_flight,
-              conversations=conversations, summaries=summaries)
+              conversations=conversations, summaries=summaries, duet=duet)
 
     sem = asyncio.Semaphore(max_in_flight)
     write_lock = asyncio.Lock()
@@ -625,7 +643,8 @@ async def embed_corpus(
                         documents=chunks,
                         metadatas=[
                             {"slug": src.slug, "kind": src.kind, "path": str(src.path),
-                             "chunk": i, "content_hash": chash}
+                             "chunk": i, "content_hash": chash,
+                             **({"tree": TREE_DUET} if src.duet else {})}
                             for i in range(len(chunks))
                         ],
                     )
@@ -667,12 +686,19 @@ async def search(
     model: str,
     k: int = 5,
     kind: str | None = None,
+    duet: bool = False,
 ) -> list[dict]:
     """Embed the query and return the k nearest chunks (text + metadata + score).
-    `kind` filters to "conversation" or "summary"; None searches both."""
+    `kind` filters to "conversation" or "summary"; None searches both. Chunks
+    tagged `tree: duet` are left out unless `duet` is on."""
     col = open_collection(persist_dir, backend=backend, model=model)
     qvec = (await embedder.embed([query]))[0]
-    where = {"kind": kind} if kind else None
+    clauses: list[dict] = []
+    if kind:
+        clauses.append({"kind": kind})
+    if not duet:
+        clauses.append({"tree": {"$ne": TREE_DUET}})
+    where = {"$and": clauses} if len(clauses) > 1 else (clauses[0] if clauses else None)
     res = col.query(query_embeddings=[qvec], n_results=k, where=where)
     docs = (res.get("documents") or [[]])[0]
     metas = (res.get("metadatas") or [[]])[0]

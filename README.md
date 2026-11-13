@@ -45,6 +45,8 @@ Open `~/claude-export/INDEX.md` when it's done.
 
 `claude-cli` is the default provider. Select another with `--provider`, `--api` (alias for `--provider anthropic`), `--subscription` (alias for `--provider claude-cli`), or `$CSINDEX_PROVIDER`.
 
+Transcripts are untrusted text, so the summarizer never gets a tool that can act on anything. `claude-cli` runs `claude -p --restricted --strict-mcp-config --no-session-persistence --tools ""` from an empty temporary directory, so no MCP server loads, the session runs in the default permission mode rather than yours, and no copy of the transcript is saved to Claude Code's session history. For a transcript over 200KB it allows only `--tools Read`, on a private copy of that one `conversation.md`. This needs a Claude Code release that accepts those flags; an older one fails with a message asking you to upgrade.
+
 ## How it works
 
 `csindex full` walks the export depth-first:
@@ -56,6 +58,51 @@ Open `~/claude-export/INDEX.md` when it's done.
 Each level's `INDEX.md` stamps a content hash of its inputs. On the next run, anything whose inputs haven't changed is skipped — only new or edited conversations get re-summarized. Pass `--force` to ignore the cache and re-summarize everything.
 
 If a provider call fails in a retryable way (malformed structured output, a parse failure), the runner retries once against that provider's configured `escalation` model — a stronger model for the cases the normal tier can't handle. Escalation is per-provider and configurable in `reindex.toml`. The root step never escalates — it already runs the strongest configured model, so retrying "up" would be a downgrade.
+
+## The Duet tree
+
+Newer claudesync exports can carry a `duet/` directory beside `conversations/` and `projects/`, holding Claude Duet chat and tasks:
+
+```
+<export root>/duet/
+  duet.json, tasks.json
+  knowledge/TASKS.md
+  conversations/<YYYY-MM-DD>-<channel-slug>/conversation.md
+```
+
+`csindex` indexes it by default, reusing the same three steps:
+
+- Each channel-day under `duet/conversations/` is an ordinary leaf and gets its own `INDEX.md`.
+- `duet/` is treated as one more project (slug `duet`), so `duet/INDEX.md` aggregates the day summaries and lists `knowledge/TASKS.md`. It is skipped while there are no day directories.
+- The root `INDEX.md` includes `duet/INDEX.md` as a `=== duet ===` section.
+- `csindex embed` embeds the Duet day conversations and summaries under the usual `--no-conversations` / `--no-summaries` switches.
+- `csindex repair-hashes` stamps the Duet hashes too.
+
+**What leaves your machine.** With Duet indexing on, Duet chat is sent to the configured LLM provider, and with `csindex embed` also to the embedding backend. Duet chat can quote email and calendar text written by other people. When Duet runs only because it is on by default, with no setting of yours, `csindex` logs one info line, `duet_default_on`, saying so.
+
+**Only tool-free providers see Duet.** Quoted email is untrusted text that can carry instructions, so Duet leaves only ever reach a model that has no tools. `claude-cli`, `anthropic` and `ollama` qualify. `opencode` qualifies only when its tool-free `quick` agent is configured; without it, `csindex full` skips everything under `duet/` for that run and logs an error-level `duet_skipped_provider_not_tool_safe` line.
+
+A root that contains only `duet/` is a valid export tree.
+
+Exports with no `duet/` directory behave exactly as before, and the root cache key is unchanged, so nothing is re-summarized.
+
+To turn it off, use any one of these (highest precedence first). With it off, nothing under `duet/` is read, written, hashed or embedded:
+
+| Mechanism | Setting |
+|---|---|
+| CLI, on `full`, `embed` and `repair-hashes` | `--no-duet` (`--duet` forces it on) |
+| Environment, including `<export>/.env` | `CSINDEX_DUET=off`. Accepted values are `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`, in any case; any other value exits with an error. |
+| `reindex.toml` | `[reindex.sources]` with `duet = false`. An unknown key in that table is an error. |
+
+`search` and `batches resume` follow the environment and `reindex.toml`. `quick` never reads `duet/`, takes no Duet flag, and its prompt forbids changes inside `duet/`.
+
+Turning Duet off stops new work, not past work:
+
+- Text already sent to a provider or an embedding backend cannot be recalled.
+- A pending batch submitted while Duet was on is not finalized into `duet/` once Duet is off. Its Duet items are dropped with a `duet_item_skipped` warning.
+- Chunks already in the vector store stay there. They carry the metadata `tree: duet`, and `search` leaves them out while Duet is off. To remove them, delete `<export>/.vector-db/`, or point `--persist` at a new directory, and run `csindex embed --no-duet` again.
+
+Known limitation: a claude.ai project whose directory is literally `projects/duet` would collide with this tree's project slug `duet`, and two project items with the same batch custom id would lose one result. When `projects/duet` exists, the Duet project step is skipped with a `duet_project_skipped` warning: the Duet days are still summarized, but `duet/INDEX.md` is not regenerated.
 
 ## Commands
 
@@ -102,7 +149,8 @@ Environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `CSINDEX_ROOT` | Export tree path. Precedence: `--root` > `$CSINDEX_ROOT` > current directory. An invalid tree (no `conversations/` or `projects/` subdirectory) exits `65`. |
+| `CSINDEX_ROOT` | Export tree path. Precedence: `--root` > `$CSINDEX_ROOT` > current directory. An invalid tree (none of `conversations/`, `projects/` or `duet/` present) exits `65`. |
+| `CSINDEX_DUET` | `0`, `false`, `no` or `off` skips the `duet/` tree; `1`, `true`, `yes` or `on` indexes it; any other value exits with an error. Overrides `reindex.toml`; `--duet`/`--no-duet` overrides this. See [The Duet tree](#the-duet-tree). |
 | `CSINDEX_PROVIDER` | Default provider, overriding `reindex.toml`'s `[reindex].provider`. |
 | `CSINDEX_ROOT_MODEL` | Overrides the root-tier model for any provider, independent of `reindex.toml`'s per-provider model tiers. |
 | `CSINDEX_COST_LOG` | Path to the JSONL cost log. Defaults to `<export>/.reindex-costs.jsonl`. |

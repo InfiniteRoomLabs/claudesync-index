@@ -58,9 +58,13 @@ def project_children_hash(project_dir: Path) -> str:
     return _sha256_bytes("\n".join(pairs).encode() + b"\n")
 
 
-def root_inputs_hash(export_dir: Path) -> str:
+def root_inputs_hash(export_dir: Path, *, duet: bool = False) -> str:
     """Cache key for root. Aggregates project children_hashes,
-    standalone content_hashes, and the root schema hash."""
+    standalone content_hashes, the root schema hash and, when `duet` is on and
+    `duet/INDEX.md` carries a children_hash, a `duet:<children_hash>` entry.
+
+    With `duet` off or no Duet index the key is byte-identical to the
+    pre-Duet one, so existing exports see no cache invalidation."""
     pairs: list[str] = []
 
     proj_dir = export_dir / "projects"
@@ -78,6 +82,11 @@ def root_inputs_hash(export_dir: Path) -> str:
             h = read_frontmatter_field(c_idx, "content_hash")
             if slug and h:
                 pairs.append(f"standalone:{slug}:{h}")
+
+    if duet:
+        duet_idx = export_dir / "duet" / "INDEX.md"
+        if duet_idx.is_file() and (h := read_frontmatter_field(duet_idx, "children_hash")):
+            pairs.append(f"duet:{h}")
 
     pairs.append(f"schema:{schema_hash(models.RootAggregate)}")
     pairs.sort()

@@ -80,6 +80,9 @@ def tmp_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Test isolation: provider selection reads $CSINDEX_PROVIDER; clear it so
     # a developer's shell env can't leak into tests.
     monkeypatch.delenv("CSINDEX_PROVIDER", raising=False)
+    # And the Duet switch: a shell with CSINDEX_DUET=off must not hide Duet
+    # from the tests that exercise it.
+    monkeypatch.delenv("CSINDEX_DUET", raising=False)
     # Same for the embedding backend trio — a dev shell exporting these for
     # `csindex embed`/`search` use must not leak into tests.
     monkeypatch.delenv("CSINDEX_EMBED_BACKEND", raising=False)
@@ -123,6 +126,81 @@ def make_project(tmp_export: Path):
                 (proj / "knowledge" / fn).write_text(content, encoding="utf-8")
         return proj
     return _make
+
+
+@pytest.fixture
+def make_duet(tmp_export: Path):
+    """Factory for the `duet/` tree: one conversation.md per channel-day slug,
+    plus knowledge/TASKS.md and the duet.json / tasks.json manifests."""
+    def _make(*days: str, tasks_md: bool = True) -> Path:
+        duet = tmp_export / "duet"
+        (duet / "conversations").mkdir(parents=True, exist_ok=True)
+        (duet / "duet.json").write_text("{}", encoding="utf-8")
+        (duet / "tasks.json").write_text("[]", encoding="utf-8")
+        if tasks_md:
+            (duet / "knowledge").mkdir(exist_ok=True)
+            (duet / "knowledge" / "TASKS.md").write_text("# Tasks\n", encoding="utf-8")
+        for day in days:
+            d = duet / "conversations" / day
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "conversation.md").write_text(
+                f"## Human\n_2026-11-13T09:00:00Z_\n\nduet chat {day}\n", encoding="utf-8",
+            )
+        return duet
+    return _make
+
+
+@pytest.fixture
+def pending_duet_leaf(tmp_export: Path, make_duet, valid_leaf):
+    """A persisted leaf batch for one Duet day, as `full` leaves it when it
+    submits with Duet on and exits. Returns (index_path, drain): the INDEX.md
+    a resume would write, and a stand-in for a provider's resume_pending that
+    finalizes every persisted item with a valid payload."""
+    from reindex.state import BatchState, PersistedItem
+
+    day = make_duet("2026-11-01-general") / "conversations" / "2026-11-01-general"
+    out = day / "INDEX.md"
+    BatchState(tmp_export).add(
+        batch_id="msgbatch_duet", step="leaf", model="claude-haiku-4-5",
+        items=[PersistedItem(custom_id=day.name, step_kwargs={
+            "out_file": str(out), "content_hash": "h" * 64, "slug": day.name,
+            "generated_at": "2026-11-13T00:00:00Z", "model": "claude-haiku-4-5", "duet": True,
+        })],
+    )
+
+    async def drain(*, state, finalize_persisted, **_):
+        for pb in state.load():
+            for it in pb.items:
+                await finalize_persisted(pb.step, it.step_kwargs, valid_leaf, 0.0, 1, 0)
+            state.remove(pb.batch_id)
+
+    return out, drain
+
+
+@pytest.fixture
+def duet_touches(tmp_export: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Records every content-level pathlib call (read, write, open, list, glob,
+    create) made on a path below `<export>/duet`. A test that expects Duet to
+    be invisible asserts the returned list is empty after the run."""
+    import pathlib
+
+    touched: list[tuple[str, str]] = []
+    base = len(tmp_export.parts)
+
+    def wrap(name: str) -> None:
+        real = getattr(pathlib.Path, name)
+
+        def spy(self, *args, **kwargs):
+            if "duet" in self.parts[base:]:
+                touched.append((name, str(self)))
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, name, spy)
+
+    for name in ("read_text", "read_bytes", "write_text", "write_bytes", "open",
+                 "iterdir", "glob", "rglob", "mkdir", "touch", "unlink", "rename", "replace"):
+        wrap(name)
+    return touched
 
 
 # ---------------------------------------------------------------------------

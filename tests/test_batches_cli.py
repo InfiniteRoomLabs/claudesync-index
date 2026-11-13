@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from reindex import batches_cli, cli, exit_codes
@@ -266,6 +267,22 @@ def test_resume_drains_state(tmp_export, fake_api_key, monkeypatch):
         res = runner.invoke(cli.app, ["batches", "resume"])
     assert res.exit_code == exit_codes.OK
     prov.resume_pending.assert_awaited_once()
+
+
+@pytest.mark.parametrize(("env", "written"), [("off", False), ("on", True)])
+def test_resume_honours_the_duet_setting_for_pending_duet_items(
+    tmp_export, pending_duet_leaf, fake_api_key, monkeypatch, env, written,
+):
+    _patch_dotenv(monkeypatch)
+    monkeypatch.setenv("CSINDEX_DUET", env)
+    out, drain = pending_duet_leaf
+    prov = _mock_provider()
+    prov.resume_pending = drain
+    with _patch_provider(prov):
+        res = runner.invoke(cli.app, ["batches", "resume", "--log-level", "warn"])
+    assert res.exit_code == exit_codes.OK, res.output
+    assert out.is_file() is written
+    assert ("duet_item_skipped" in res.output) is not written
 
 
 def test_resume_failures_return_tempfail(tmp_export, fake_api_key, monkeypatch):

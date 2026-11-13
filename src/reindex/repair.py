@@ -21,7 +21,8 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
-from reindex import exit_codes, hashing, log, paths, stamp
+from reindex import config, exit_codes, hashing, log, paths, stamp
+from reindex.cli_options import DuetOption
 from reindex.lockfile import single_instance
 
 app = typer.Typer(no_args_is_help=False, add_completion=False)
@@ -47,6 +48,7 @@ def repair_hashes(
     dry_run: bool = typer.Option(False, "--dry-run"),
     log_level: str = typer.Option(None, "--log-level"),
     log_format: str = typer.Option(None, "--log-format"),
+    duet: DuetOption = None,
 ) -> None:
     """Recompute content_hash, children_hash, inputs_hash for existing INDEX.md files."""
     # `--root` is accepted both before the subcommand (parsed by the cli app
@@ -61,6 +63,9 @@ def repair_hashes(
     load_dotenv(paths.EXPORT_ROOT / ".env")
     log.configure(level=log_level, fmt=log_format)
     rl = log.get("repair")
+    # Same flag, precedence and .env handling as `csindex full`, so repair
+    # stamps the root hash that `full` computes under the same setting.
+    duet_on = config.resolve_duet(paths.EXPORT_ROOT, duet)
 
     try:
         with single_instance(paths.EXPORT_ROOT):
@@ -72,6 +77,8 @@ def repair_hashes(
             if proj_dir.is_dir():
                 for proj in sorted(p for p in proj_dir.iterdir() if p.is_dir()):
                     leaf_dirs.extend(collect_indexed_conversation_dirs(proj / "conversations"))
+            if duet_on:
+                leaf_dirs.extend(collect_indexed_conversation_dirs(paths.EXPORT_ROOT / "duet" / "conversations"))
 
             rl.info("leaves_found", count=len(leaf_dirs))
             for d in leaf_dirs:
@@ -93,6 +100,8 @@ def repair_hashes(
                 for proj in sorted(p for p in proj_dir.iterdir() if p.is_dir()):
                     if (proj / "INDEX.md").is_file():
                         project_dirs.append(proj)
+            if duet_on and (paths.EXPORT_ROOT / "duet" / "INDEX.md").is_file():
+                project_dirs.append(paths.EXPORT_ROOT / "duet")
             rl.info("projects_found", count=len(project_dirs))
             for d in project_dirs:
                 h = hashing.project_children_hash(d)
@@ -103,7 +112,7 @@ def repair_hashes(
             rl.info("projects_done")
 
             if (paths.EXPORT_ROOT / "INDEX.md").is_file():
-                h = hashing.root_inputs_hash(paths.EXPORT_ROOT)
+                h = hashing.root_inputs_hash(paths.EXPORT_ROOT, duet=duet_on)
                 if dry_run:
                     rl.debug("would_stamp_root", hash=h)
                 else:

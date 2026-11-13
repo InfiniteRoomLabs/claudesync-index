@@ -2,8 +2,9 @@
 claude-cli provider: `claude -p` subprocess (subscription quota).
 
 The only provider with supports_file_transcripts — oversized transcripts
-are delivered via the Read tool with --add-dir instead of inlined.
-Structured output via --json-schema plus a local validate/coerce pass.
+are delivered via the Read tool instead of inlined, from a private copy in
+a throwaway directory. Structured output via --json-schema plus a local
+validate/coerce pass.
 """
 
 from __future__ import annotations
@@ -11,7 +12,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import shutil
+import tempfile
+from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -38,6 +43,24 @@ _STREAM_CAP = 4096
 # mode, and envelope_parse signals a claude -p CLI bug that a bigger
 # model won't fix.
 _RETRYABLE_KINDS = frozenset({"result_parse", "schema_violation"})
+
+# The flags that keep untrusted transcript text away from tools. A claude
+# too old to know them fails with commander's "unknown option" error; that
+# is reported as an upgrade request, never retried without them.
+_HARDENING_FLAGS = ("--restricted", "--strict-mcp-config", "--tools")
+_UNKNOWN_OPTION = re.compile(r"unknown option", re.IGNORECASE)
+
+
+def _result_envelope(parsed: Any) -> dict | None:
+    """The result envelope from `--output-format json` output. Most builds
+    print one object; some print the whole event stream as a JSON array, in
+    which case the last `"type": "result"` event is the envelope."""
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        results = [e for e in parsed if isinstance(e, dict) and e.get("type") == "result"]
+        return results[-1] if results else None
+    return None
 
 
 async def _close_subprocess(proc: asyncio.subprocess.Process) -> None:
@@ -83,6 +106,7 @@ def strip_fences(s: str) -> str:
 class ClaudeCliProvider(Provider):
     name = "claude-cli"
     supports_file_transcripts = True
+    tool_safe = True  # --restricted --strict-mcp-config --tools "" (or Read on a private copy)
 
     async def preflight(self) -> None:
         if shutil.which("claude") is None:
@@ -104,11 +128,16 @@ class ClaudeCliProvider(Provider):
     async def invoke(self, req: InvokeRequest) -> InvokeResult:
         """claude -p subprocess with --json-schema.
 
-        req.allow_filesystem: when True, whitelist req.work_dir via
-        --add-dir so the model can call the Read tool on files inside it.
-        Used by the file-mode leaf summarizer for transcripts too large to
-        inline. Write/Edit/NotebookEdit/Bash stay disallowed in both modes.
+        req.allow_filesystem: when True (file-mode leaves, transcripts too
+        large to inline), `<req.work_dir>/conversation.md` is copied into a
+        throwaway directory and the model may call Read on that copy only.
+        Otherwise the model has no tools at all. Either way the subprocess
+        runs in a fresh temporary directory, removed afterwards.
         """
+        with tempfile.TemporaryDirectory(prefix="csindex-claude-") as sandbox:
+            return await self._invoke_in(Path(sandbox), req)
+
+    async def _invoke_in(self, sandbox: Path, req: InvokeRequest) -> InvokeResult:
         blog = log.get("backend").bind(step=req.step, slug=req.slug)
         schema = req.schema_cls.model_json_schema()
         schema_str = json.dumps(schema)
@@ -127,33 +156,52 @@ class ClaudeCliProvider(Provider):
             f"The JSON must conform to this schema:\n{schema_str}"
         )
 
-        # Lock the subprocess down to JSON-out only:
-        #   * --disallowed-tools removes Write/Edit/NotebookEdit/Bash so the model
-        #     can't write a side-effect artifact and return prose about it instead
-        #     of the required JSON payload (observed failure mode: the summarizer
-        #     misread the request as an implementation task, wrote a file to disk,
-        #     and returned a status message instead of structured output).
-        #   * --add-dir only when allow_filesystem=True (file-mode leaves). The
-        #     inline path doesn't need filesystem access; the transcript is in
-        #     stdin via user_content.
-        #   * permission-mode left at default (was acceptEdits). With no
-        #     side-effect tools allowed, the mode is moot, but 'default' is the
-        #     more honest baseline.
+        # The transcript is untrusted text: a quoted email, a pasted web page
+        # or a Duet message can carry instructions. It must never meet a tool,
+        # an MCP server or the user's permission mode. Verified on 2026-11-13
+        # against claude 2.1.325: the old `--disallowed-tools` invocation
+        # started with 266 tools, the user's MCP servers and the user's
+        # permission mode; the invocation below starts with exactly one tool
+        # (StructuredOutput), no MCP servers and the default permission mode.
+        #   * --restricted --strict-mcp-config: always. No --mcp-config is
+        #     given, so no MCP server (mail, chat, ...) loads.
+        #   * --tools "" (inline): no built-in tools; the model can answer only
+        #     through --json-schema's structured output.
+        #   * --tools Read (file mode, oversized transcripts): the one tool the
+        #     file-mode prompt needs. conversation.md is copied into the
+        #     sandbox, the sandbox is the only --add-dir, and the prompt is
+        #     rewritten to name the copy, so the leaf's siblings
+        #     (messages.json, README.md) and the export root stay unreachable.
+        #   * cwd=<sandbox>: a fresh temporary directory in both modes, so the
+        #     session's working directory never holds export content.
+        #   * --no-session-persistence: the session is not saved. Every call
+        #     runs from a new directory, so a saved session would leave one
+        #     ~/.claude/projects entry (holding the transcript) per summary.
+        #     Verified 2026-11-13: the entry count is unchanged after a call,
+        #     and in file mode a Read outside the sandbox is denied.
+        # Never fall back to a weaker invocation: an older claude that rejects
+        # these flags gets an upgrade message (below), not a retry without them.
         cli_args = [
             "claude", "-p",
             "--model", req.model,
-            "--disallowed-tools", "Write Edit NotebookEdit Bash",
-            "--output-format", "json",
-            "--json-schema", schema_str,
+            "--restricted", "--strict-mcp-config", "--no-session-persistence",
         ]
         if req.allow_filesystem and req.work_dir is not None:
-            cli_args.extend(["--add-dir", str(req.work_dir)])
+            original = req.work_dir / "conversation.md"
+            copy = sandbox / "conversation.md"
+            shutil.copyfile(original, copy)
+            combined = combined.replace(str(original), str(copy))
+            cli_args.extend(["--tools", "Read", "--add-dir", str(sandbox)])
+        else:
+            cli_args.extend(["--tools", ""])
+        cli_args.extend(["--output-format", "json", "--json-schema", schema_str])
 
         proc = await asyncio.create_subprocess_exec(
             *cli_args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(sandbox),
         )
         try:
             stdout, stderr = await proc.communicate(input=combined.encode("utf-8"))
@@ -169,8 +217,15 @@ class ClaudeCliProvider(Provider):
                 stderr=stderr_text,
                 stdout_preview=stdout_text[:500],
             )
+            message = f"claude -p exit {proc.returncode}"
+            if _UNKNOWN_OPTION.search(stderr_text):
+                message = (
+                    f"{message}: this Claude Code does not support {', '.join(_HARDENING_FLAGS)}, "
+                    "which csindex needs to run the summarizer without tools. "
+                    "Install a newer Claude Code (`claude update`) and rerun."
+                )
             raise self._fail(
-                f"claude -p exit {proc.returncode}",
+                message,
                 kind="process_exit",
                 exit_code=proc.returncode,
                 stderr=stderr_text,
@@ -178,7 +233,7 @@ class ClaudeCliProvider(Provider):
             )
 
         try:
-            envelope = json.loads(stdout.decode("utf-8", errors="replace"))
+            parsed = json.loads(stdout.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as e:
             blog.error("subscription_envelope_parse", error=str(e)[:300], stdout_preview=stdout_text[:500])
             raise self._fail(
@@ -188,6 +243,16 @@ class ClaudeCliProvider(Provider):
                 stderr=stderr_text,
                 stdout=stdout_text,
             ) from e
+        envelope = _result_envelope(parsed)
+        if envelope is None:
+            blog.error("subscription_envelope_parse", error="no result object", stdout_preview=stdout_text[:500])
+            raise self._fail(
+                "claude -p returned JSON without a result envelope",
+                kind="envelope_parse",
+                exit_code=proc.returncode,
+                stderr=stderr_text,
+                stdout=stdout_text,
+            )
 
         cost = float(envelope.get("total_cost_usd", 0))
         turns = int(envelope.get("num_turns", 0))
