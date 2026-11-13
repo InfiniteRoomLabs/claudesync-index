@@ -100,6 +100,52 @@ def test_repair_stamps_root_index(tmp_export, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Duet: repaired like any project when enabled, invisible when not
+# ---------------------------------------------------------------------------
+
+def _duet_with_indexes(tmp_export: Path, make_duet) -> Path:
+    duet = make_duet("2026-11-01-general")
+    day = duet / "conversations" / "2026-11-01-general"
+    _write_index(day / "INDEX.md", slug="2026-11-01-general", content_hash="STAMPED_AFTER")
+    _write_index(duet / "INDEX.md", slug="duet", children_hash="STAMPED_AFTER")
+    _write_index(tmp_export / "INDEX.md", inputs_hash="STAMPED_AFTER")
+    return duet
+
+
+def test_repair_stamps_duet_leaves_project_and_root_when_enabled(tmp_export, make_duet, monkeypatch):
+    monkeypatch.setattr(repair, "load_dotenv", lambda *a, **k: None)
+    duet = _duet_with_indexes(tmp_export, make_duet)
+    day = duet / "conversations" / "2026-11-01-general"
+
+    res = runner.invoke(repair.app, [])
+    assert res.exit_code == exit_codes.OK
+
+    leaf_hash = hashing.leaf_hash(day / "conversation.md")
+    assert f"content_hash: {leaf_hash}" in (day / "INDEX.md").read_text(encoding="utf-8")
+    # Order matters: the duet project hash reads the freshly stamped day hash,
+    # and the root hash reads the freshly stamped duet hash.
+    project_hash = hashing.project_children_hash(duet)
+    assert f"children_hash: {project_hash}" in (duet / "INDEX.md").read_text(encoding="utf-8")
+    root_hash = hashing.root_inputs_hash(tmp_export, duet=True)
+    assert f"inputs_hash: {root_hash}" in (tmp_export / "INDEX.md").read_text(encoding="utf-8")
+
+
+def test_repair_ignores_duet_when_disabled(tmp_export, make_duet, monkeypatch, duet_touches):
+    monkeypatch.setattr(repair, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("CSINDEX_DUET", "off")
+    duet = _duet_with_indexes(tmp_export, make_duet)
+    snapshot = {p: p.read_bytes() for p in duet.rglob("*") if p.is_file()}
+    duet_touches.clear()
+
+    res = runner.invoke(repair.app, [])
+    assert res.exit_code == exit_codes.OK
+    assert duet_touches == []
+    assert {p: p.read_bytes() for p in duet.rglob("*") if p.is_file()} == snapshot
+    expected = hashing.root_inputs_hash(tmp_export)  # duet off
+    assert f"inputs_hash: {expected}" in (tmp_export / "INDEX.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Dry run
 # ---------------------------------------------------------------------------
 
